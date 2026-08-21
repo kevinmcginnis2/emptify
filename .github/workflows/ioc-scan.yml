@@ -1,0 +1,116 @@
+name: Malware IOC Scan
+on:
+  pull_request:
+    branches: ['**']
+  push:
+    branches: ['**']
+permissions:
+  contents: read
+jobs:
+  ioc-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan for known malware IOC strings
+        run: |
+          set -e
+          PATTERNS=(
+            '_\$_1e42'
+            "global\['!'\]='[0-9]-[0-9]+'"
+            "global\['_V'\]='A[0-9]-[0-9]+'"
+            'TMfKQEd7TJJa5xNZJZ2Lep838vrzrs7mAP'
+            'TXfxHUet9pJVU1BgVkBAbrES4YUc1nGzcG'
+            'api\.trongrid\.io'
+            'bsc-dataseed\.binance\.org'
+            'bsc-rpc\.publicnode\.com'
+            '166\.88\.54\.158'
+            'exec\(Request\._code\)'
+            'setup_bun\.js'
+            'bun_environment\.js'
+            'Sha1-Hulud'
+            'Shai-Hulud'
+          )
+          # Files that legitimately contain these strings (this scanner itself,
+          # the playbook, and the local pre-push hook). They must be excluded or
+          # the scan will match itself and fail every PR.
+          EXCLUDE_FILES=(
+            '.github/workflows/ioc-scan.yml'
+            'docs/malware-response-playbook.md'
+            '.git-hooks/pre-push'
+          )
+          # Build a grep exclusion argument list
+          exclude_args=()
+          for f in "${EXCLUDE_FILES[@]}"; do
+            exclude_args+=(--exclude="$(basename "$f")")
+          done
+          # Also exclude the entire .github/workflows directory from this scan
+          exclude_args+=(--exclude-dir=".github")
+          found=0
+          for pattern in "${PATTERNS[@]}"; do
+            matches=$(grep -rln -E "$pattern" . \
+              --include="*.js" --include="*.mjs" --include="*.cjs" \
+              --include="*.ts" --include="*.tsx" --include="*.jsx" \
+              --include="*.json" --include="*.yml" --include="*.yaml" \
+              "${exclude_args[@]}" \
+              2>/dev/null || true)
+            # Belt-and-braces: also filter out any explicit excluded paths
+            if [ -n "$matches" ]; then
+              filtered=""
+              while IFS= read -r line; do
+                skip=0
+                for excl in "${EXCLUDE_FILES[@]}"; do
+                  if [[ "$line" == *"$excl" ]]; then
+                    skip=1
+                    break
+                  fi
+                done
+                if [ $skip -eq 0 ]; then
+                  filtered+="$line"$'\n'
+                fi
+              done <<< "$matches"
+              matches="${filtered%$'\n'}"
+            fi
+            if [ -n "$matches" ]; then
+              echo "::error::IOC pattern '$pattern' detected:"
+              echo "$matches" | while read f; do
+                [ -n "$f" ] && echo "::error file=$f::Malware IOC matched in $f"
+              done
+              found=1
+            fi
+          done
+          if [ $found -eq 1 ]; then
+            echo "::error::Known malware IOC strings found. Push/PR blocked."
+            exit 1
+          fi
+          echo ":white_check_mark: No IOC strings detected."
+      - name: Check config file sizes (must be under 1000 bytes)
+        run: |
+          set -e
+          THRESHOLD=1000
+          found=0
+          for pattern in 'postcss.config.*' 'next.config.*' 'vite.config.*' 'tailwind.config.*' 'webpack.config.*'; do
+            for f in $(find . -name "$pattern" -not -path "*/node_modules/*" 2>/dev/null); do
+              size=$(stat -c %s "$f" 2>/dev/null || stat -f %z "$f")
+              # postcss configs MUST be under 1000 bytes
+              if [[ "$f" == *postcss.config* ]] && [ "$size" -gt "$THRESHOLD" ]; then
+                echo "::error file=$f::postcss.config file is $size bytes (limit: $THRESHOLD). Possible malware injection."
+                found=1
+              fi
+              # Other configs warn at 2000 bytes (next.config can legitimately be larger)
+              if [[ "$f" != *postcss.config* ]] && [ "$size" -gt 2000 ]; then
+                echo "::warning file=$f::Config file is $size bytes. Manual review recommended."
+                # Check for suspiciously long lines
+                max_len=$(awk '{ print length }' "$f" | sort -rn | head -1)
+                if [ "${max_len:-0}" -gt 500 ]; then
+                  echo "::error file=$f::File has a line $max_len chars long — possible hidden payload after whitespace."
+                  found=1
+                fi
+              fi
+            done
+          done
+          if [ $found -eq 1 ]; then
+            exit 1
+          fi
+          echo ":white_check_mark: Config file size check passed."
