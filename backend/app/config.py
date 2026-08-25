@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     port: int = 8000
     mongodb_uri: str = ""
     cors_origins: str = "http://localhost:3000"
+    frontend_url: str = "http://localhost:3000"
 
     google_client_id: str = ""
     google_client_secret: str = ""
