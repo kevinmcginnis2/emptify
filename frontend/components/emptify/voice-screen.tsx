@@ -18,7 +18,7 @@ export function VoiceScreen({ voice, onNotesChange, onRebuild }: VoiceScreenProp
   return (
     <div>
       <h2 className="mb-[var(--space-1)]">Voice profiles</h2>
-      <p className="text-muted max-w-[560px] mb-[var(--space-6)]">
+      <p className="text-emptify-muted max-w-[560px] mb-[var(--space-6)]">
         Built once from 90 days of sent mail, split by recipient domain. Edit the notes to steer future drafts.
       </p>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-[var(--space-6)]">
@@ -29,14 +29,14 @@ export function VoiceScreen({ voice, onNotesChange, onRebuild }: VoiceScreenProp
               <BlueprintCorners />
               <div className="card-kicker">{kicker}</div>
               <div className="card-title">{title}</div>
-              <div className="text-muted text-[13px]">{vp.sampleSize}</div>
+              <div className="text-emptify-muted text-[13px]">{vp.sampleSize}</div>
               <div className="flex flex-col gap-[var(--space-1)] mt-[var(--space-2)]">
                 {vp.traits.map((tr) => (
                   <div
                     key={tr.label}
                     className="grid grid-cols-[120px_1fr] gap-[var(--space-2)] text-[13px] py-1 border-b border-[var(--color-divider)]"
                   >
-                    <span className="text-muted">{tr.label}</span>
+                    <span className="text-emptify-muted">{tr.label}</span>
                     <span>{tr.value}</span>
                   </div>
                 ))}

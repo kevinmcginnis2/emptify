@@ -55,7 +55,7 @@ export function DetailScreen({
               <BlueprintCorners />
               <div className="flex justify-between text-[13px]">
                 <strong>{m.from}</strong>
-                <span className="text-muted">{m.at}</span>
+                <span className="text-emptify-muted">{m.at}</span>
               </div>
               <p className="m-0 text-[14px] whitespace-pre-wrap">{m.body}</p>
             </div>
@@ -66,16 +66,16 @@ export function DetailScreen({
           <div className="flex gap-[var(--space-2)] flex-wrap">
             <span className="tag tag-outline">{BUCKET_LABELS[email.bucket] ?? "—"}</span>
           </div>
-          <p className="text-muted text-[13px] m-0">{email.reason}</p>
+          <p className="text-emptify-muted text-[13px] m-0">{email.reason}</p>
           <div className="text-[13px] font-medium">
             {email.draftAuthor === "ea" ? "Edited by Theo" : "Drafted by Emptify"} — voice used:{" "}
             {email.voiceMode === "client" ? "Client voice" : "Internal voice"}
           </div>
-          <p className="text-muted text-[13px] m-0">{email.voiceWhy}</p>
+          <p className="text-emptify-muted text-[13px] m-0">{email.voiceWhy}</p>
 
           {email.eaChangeSummary && (
             <div className="text-[13px] bg-[var(--color-surface)] p-[var(--space-2)]">
-              <span className="text-muted">What Theo changed: </span>
+              <span className="text-emptify-muted">What Theo changed: </span>
               {email.eaChangeSummary}
             </div>
           )}

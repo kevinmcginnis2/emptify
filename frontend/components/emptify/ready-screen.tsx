@@ -13,7 +13,7 @@ export function ReadyScreen({ emails, onOpen }: ReadyScreenProps) {
   return (
     <div>
       <h2 className="mb-[var(--space-1)]">Ready to send</h2>
-      <p className="text-muted mb-[var(--space-6)]">Marked ready by Theo. Review and send from the right account.</p>
+      <p className="text-emptify-muted mb-[var(--space-6)]">Marked ready by Theo. Review and send from the right account.</p>
       <div className="flex flex-col gap-[var(--space-3)] max-w-[760px]">
         {emails.map((em) => (
           <div
@@ -32,10 +32,10 @@ export function ReadyScreen({ emails, onOpen }: ReadyScreenProps) {
               <span className="tag tag-accent">{ACCOUNT_LABELS[em.account]}</span>
             </div>
             <div className="card-body">To {em.from}</div>
-            <div className="text-muted text-[12px]">Theo: {em.eaChangeSummary}</div>
+            <div className="text-emptify-muted text-[12px]">Theo: {em.eaChangeSummary}</div>
           </div>
         ))}
-        {emails.length === 0 && <p className="text-muted">Nothing waiting on your review.</p>}
+        {emails.length === 0 && <p className="text-emptify-muted">Nothing waiting on your review.</p>}
       </div>
     </div>
   );

@@ -1,4 +1,4 @@
-import { Account, EmailThread, ToneData, VoiceState } from "./types";
+import { EmailThread, ToneData, VoiceState } from "./types";
 
 export const ACCOUNT_LABELS: Record<string, string> = {
   kestrel: "Kestrel Partners",
@@ -23,38 +23,6 @@ export const STATUS_LABEL: Record<string, string> = {
   expiring: "Expires in 6 days",
   reconnect: "Reconnect needed",
 };
-
-export function initialAccounts(): Account[] {
-  return [
-    {
-      id: "kestrel",
-      name: "Kestrel Partners",
-      type: "Work",
-      email: "mara@kestrelpartners.com",
-      status: "connected",
-      lastSync: "2 minutes ago",
-      internalDomains: "kestrelpartners.com",
-    },
-    {
-      id: "northwind",
-      name: "Northwind Health",
-      type: "Work · Board seat",
-      email: "mara.lindqvist@northwindhealth.org",
-      status: "expiring",
-      lastSync: "14 minutes ago",
-      internalDomains: "northwindhealth.org",
-    },
-    {
-      id: "personal",
-      name: "Personal Gmail",
-      type: "Personal",
-      email: "mara.lindqvist@gmail.com",
-      status: "reconnect",
-      lastSync: "3 days ago",
-      internalDomains: "",
-    },
-  ];
-}
 
 export function initialEmails(): EmailThread[] {
   return [

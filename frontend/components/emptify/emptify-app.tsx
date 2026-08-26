@@ -11,8 +11,10 @@ import { DetailScreen } from "./detail-screen";
 import { HandoffDialog } from "./handoff-dialog";
 import { ConfirmSendDialog } from "./confirm-send-dialog";
 import { EmptifyToast } from "./toast";
-import { initialAccounts, initialEmails, initialVoice, toneData } from "@/lib/emptify/data";
+import * as api from "@/lib/emptify/api";
+import { initialEmails, initialVoice, toneData } from "@/lib/emptify/data";
 import {
+  Account,
   AccountId,
   ConfirmDialogState,
   EmailThread,
@@ -25,6 +27,9 @@ import {
   VoiceMode,
 } from "@/lib/emptify/types";
 
+const DOMAINS_DEBOUNCE_MS = 500;
+const RESTORABLE_SCREENS: Screen[] = ["board", "voice", "connect", "queue", "ready"];
+
 const TONE_DATA = toneData();
 
 export function EmptifyApp() {
@@ -34,7 +39,8 @@ export function EmptifyApp() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detailOrigin, setDetailOrigin] = useState<Screen>("board");
 
-  const [accounts, setAccounts] = useState(initialAccounts);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [connecting, setConnecting] = useState(false);
   const [emails, setEmails] = useState(initialEmails);
   const [voice, setVoice] = useState(initialVoice);
 
@@ -45,13 +51,35 @@ export function EmptifyApp() {
 
   const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const toneTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const domainsTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
   useEffect(() => {
     return () => {
       if (undoTimer.current) clearTimeout(undoTimer.current);
       if (toneTimer.current) clearTimeout(toneTimer.current);
+      Object.values(domainsTimers.current).forEach(clearTimeout);
     };
   }, []);
+
+  useEffect(() => {
+    api.getAccounts().then(setAccounts).catch(() => {});
+
+    const requested = new URLSearchParams(window.location.search).get("screen");
+    if (requested && RESTORABLE_SCREENS.includes(requested as Screen)) {
+      setScreen(requested as Screen);
+    }
+  }, []);
+
+  // Keeps the current screen in the URL (except "detail", which has no stable
+  // reference until threads come from the backend) so a refresh — including
+  // the one after the OAuth connect/reconnect redirect — lands back where the
+  // user was instead of resetting to the board.
+  useEffect(() => {
+    if (screen === "detail") return;
+    const url =
+      screen === "board" ? window.location.pathname : `${window.location.pathname}?screen=${screen}`;
+    window.history.replaceState(null, "", url);
+  }, [screen]);
 
   const getEmail = useCallback((id: string) => emails.find((e) => e.id === id), [emails]);
 
@@ -113,19 +141,45 @@ export function EmptifyApp() {
     }, 900);
   }, [showToast]);
 
-  const updateDomains = useCallback((accId: string, val: string) => {
-    setAccounts((prev) => prev.map((a) => (a.id === accId ? { ...a, internalDomains: val } : a)));
-  }, []);
+  const updateDomains = useCallback(
+    (accId: string, val: string) => {
+      setAccounts((prev) => prev.map((a) => (a.id === accId ? { ...a, internalDomains: val } : a)));
+
+      if (domainsTimers.current[accId]) clearTimeout(domainsTimers.current[accId]);
+      domainsTimers.current[accId] = setTimeout(() => {
+        delete domainsTimers.current[accId];
+        api.patchAccountDomains(accId, val, role).catch(() => {
+          showToast("Couldn't save internal domains — try again.", false);
+        });
+      }, DOMAINS_DEBOUNCE_MS);
+    },
+    [role, showToast],
+  );
 
   const reconnectAccount = useCallback(
     (accId: string) => {
-      setAccounts((prev) =>
-        prev.map((a) => (a.id === accId ? { ...a, status: "connected" as const, lastSync: "Just now" } : a)),
-      );
-      showToast("Reconnected. Syncing now.", false);
+      api
+        .reconnectAccount(accId, role)
+        .then((authUrl) => {
+          window.location.href = authUrl;
+        })
+        .catch(() => showToast("Couldn't start reconnect — try again.", false));
     },
-    [showToast],
+    [role, showToast],
   );
+
+  const connectNewAccount = useCallback(() => {
+    setConnecting(true);
+    api
+      .getConnectUrl()
+      .then((authUrl) => {
+        window.location.href = authUrl;
+      })
+      .catch(() => {
+        setConnecting(false);
+        showToast("Couldn't start connecting — try again.", false);
+      });
+  }, [showToast]);
 
   const openHandoffDialog = useCallback((id: string) => setHandoffDialog({ emailId: id, note: "" }), []);
   const cancelHandoff = useCallback(() => setHandoffDialog(null), []);
@@ -275,7 +329,13 @@ export function EmptifyApp() {
 
       <div className="max-w-[1180px] mx-auto p-[var(--space-6)]">
         {screen === "connect" && (
-          <ConnectScreen accounts={accounts} onDomainsChange={updateDomains} onReconnect={reconnectAccount} />
+          <ConnectScreen
+            accounts={accounts}
+            onDomainsChange={updateDomains}
+            onReconnect={reconnectAccount}
+            onConnect={connectNewAccount}
+            connecting={connecting}
+          />
         )}
 
         {screen === "voice" && <VoiceScreen voice={voice} onNotesChange={updateNotes} onRebuild={rebuildVoice} />}

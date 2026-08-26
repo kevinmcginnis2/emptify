@@ -17,10 +17,10 @@ export function ConfirmSendDialog({ open, from, to, onCancel, onConfirm }: Confi
         <DialogTitle className="dialog-emptify-title">Confirm send</DialogTitle>
         <div className="flex flex-col gap-1.5 text-[14px]">
           <div>
-            <span className="text-muted">From:</span> {from}
+            <span className="text-emptify-muted">From:</span> {from}
           </div>
           <div>
-            <span className="text-muted">To:</span> {to}
+            <span className="text-emptify-muted">To:</span> {to}
           </div>
         </div>
         <div className="flex justify-end gap-[var(--space-2)] mt-[var(--space-2)]">

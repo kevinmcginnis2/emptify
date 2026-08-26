@@ -2,7 +2,7 @@ export type Role = "exec" | "ea";
 
 export type Screen = "board" | "voice" | "connect" | "queue" | "ready" | "detail";
 
-export type AccountId = "kestrel" | "northwind" | "personal";
+export type AccountId = string;
 
 export type AccountStatus = "connected" | "expiring" | "reconnect";
 

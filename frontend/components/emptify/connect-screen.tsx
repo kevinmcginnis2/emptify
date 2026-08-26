@@ -8,13 +8,15 @@ interface ConnectScreenProps {
   accounts: Account[];
   onDomainsChange: (accountId: string, value: string) => void;
   onReconnect: (accountId: string) => void;
+  onConnect: () => void;
+  connecting: boolean;
 }
 
-export function ConnectScreen({ accounts, onDomainsChange, onReconnect }: ConnectScreenProps) {
+export function ConnectScreen({ accounts, onDomainsChange, onReconnect, onConnect, connecting }: ConnectScreenProps) {
   return (
     <div>
       <h2 className="mb-[var(--space-1)]">Connect inboxes</h2>
-      <p className="text-muted max-w-[560px] mb-[var(--space-6)]">
+      <p className="text-emptify-muted max-w-[560px] mb-[var(--space-6)]">
         Every account Emptify triages, in one place. Reconnect a lapsed token or edit which domains count as internal
         for that account.
       </p>
@@ -24,7 +26,7 @@ export function ConnectScreen({ accounts, onDomainsChange, onReconnect }: Connec
             <BlueprintCorners />
             <div className="card-kicker">{acc.type}</div>
             <div className="card-title">{acc.name}</div>
-            <div className="text-muted text-[13px]">{acc.email}</div>
+            <div className="text-emptify-muted text-[13px]">{acc.email}</div>
             <span className={`tag ${STATUS_TAG_CLASS[acc.status]} self-start`}>{STATUS_LABEL[acc.status]}</span>
             <div className="card-meta">Last sync: {acc.lastSync}</div>
             <div className="mt-[var(--space-2)]">
@@ -48,8 +50,13 @@ export function ConnectScreen({ accounts, onDomainsChange, onReconnect }: Connec
           </div>
         ))}
       </div>
-      <button type="button" className="btn-emptify btn-emptify-secondary mt-[var(--space-6)]" disabled>
-        + Connect another account (3 of 3 connected in this demo)
+      <button
+        type="button"
+        className="btn-emptify btn-emptify-secondary mt-[var(--space-6)]"
+        onClick={onConnect}
+        disabled={connecting}
+      >
+        + Connect another account
       </button>
     </div>
   );

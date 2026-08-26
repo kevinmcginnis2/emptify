@@ -13,7 +13,7 @@ export function QueueScreen({ emails, onOpen }: QueueScreenProps) {
   return (
     <div>
       <h2 className="mb-[var(--space-1)]">EA queue</h2>
-      <p className="text-muted mb-[var(--space-6)]">Threads handed off, with Mara&apos;s note and the draft as it stands.</p>
+      <p className="text-emptify-muted mb-[var(--space-6)]">Threads handed off, with Mara&apos;s note and the draft as it stands.</p>
       <div className="flex flex-col gap-[var(--space-3)] max-w-[760px]">
         {emails.map((em) => {
           const preview = em.draft.length > 90 ? em.draft.slice(0, 90) + "…" : em.draft;
@@ -35,14 +35,14 @@ export function QueueScreen({ emails, onOpen }: QueueScreenProps) {
               </div>
               <div className="card-body">From {em.from}</div>
               <div className="text-[13px] bg-[var(--color-surface)] p-[var(--space-2)]">
-                <span className="text-muted">Mara&apos;s note: </span>
+                <span className="text-emptify-muted">Mara&apos;s note: </span>
                 {em.eaNote}
               </div>
-              <div className="text-muted text-[12px]">Draft: {preview}</div>
+              <div className="text-emptify-muted text-[12px]">Draft: {preview}</div>
             </div>
           );
         })}
-        {emails.length === 0 && <p className="text-muted">Nothing in the queue right now.</p>}
+        {emails.length === 0 && <p className="text-emptify-muted">Nothing in the queue right now.</p>}
       </div>
     </div>
   );

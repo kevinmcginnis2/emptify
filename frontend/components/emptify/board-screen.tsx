@@ -36,7 +36,7 @@ function Column({
   return (
     <div>
       <h4 className="mb-[var(--space-4)]">
-        {title} <span className="text-muted">({emails.length})</span>
+        {title} <span className="text-emptify-muted">({emails.length})</span>
       </h4>
       <div className="flex flex-col gap-[var(--space-4)]">
         {emails.map((em) => (
