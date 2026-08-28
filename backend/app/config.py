@@ -7,7 +7,6 @@ class Settings(BaseSettings):
     app_env: str = "development"
     port: int = 8000
     mongodb_uri: str = ""
-    cors_origins: str = "http://localhost:3000"
     frontend_url: str = "http://localhost:3000"
 
     google_client_id: str = ""
@@ -16,10 +15,6 @@ class Settings(BaseSettings):
 
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-5"
-
-    @property
-    def cors_origin_list(self) -> list[str]:
-        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
 
 settings = Settings()
