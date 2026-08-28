@@ -80,8 +80,6 @@ export interface VoiceState {
   internal: VoiceProfile;
 }
 
-export type ToneData = Record<string, Record<Tone, string>>;
-
 export interface ToastState {
   message: string;
   showUndo: boolean;

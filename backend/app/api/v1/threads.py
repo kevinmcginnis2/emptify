@@ -1,11 +1,13 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from pydantic import BaseModel
 
 from app.api.v1.deps import require_exec, require_role
 from app.db import get_db
-from app.services import gmail
+from app.services import gmail, tone as tone_service
 from app.services.audit import write_audit_entry
 from app.services.triage import sync_board
 
@@ -13,6 +15,15 @@ router = APIRouter(prefix="/threads", tags=["threads"])
 
 SEND_UNDO_WINDOW_SECONDS = 12
 VALID_STATUSES = ("board", "withEA", "readyToSend")
+EDITABLE_STATUSES = ("board", "withEA", "readyToSend")
+
+
+class PatchDraftBody(BaseModel):
+    draft: str
+
+
+class ToneBody(BaseModel):
+    tone: Literal["shorter", "warmer", "firmer"]
 
 
 def _thread_response(doc: dict) -> dict:
@@ -139,3 +150,61 @@ async def undo_thread(thread_id: str, role=Depends(require_role), db=Depends(get
         },
     )
     return {"status": prev_status}
+
+
+@router.patch("/{thread_id}/draft")
+async def patch_draft(thread_id: str, body: PatchDraftBody, role=Depends(require_role), db=Depends(get_db)):
+    doc = await db.threads.find_one_and_update(
+        {"_id": thread_id},
+        {"$set": {"draft": body.draft}},
+        return_document=True,
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    return _thread_response(doc)
+
+
+@router.post("/{thread_id}/tone")
+async def tone_thread(thread_id: str, body: ToneBody, role=Depends(require_role), db=Depends(get_db)):
+    thread = await db.threads.find_one({"_id": thread_id})
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    if thread["status"] not in EDITABLE_STATUSES:
+        raise HTTPException(status_code=409, detail="Thread is not in an editable status")
+
+    voice_profile = await db.voice_profiles.find_one({"_id": thread["voice_mode"]})
+    voice_traits = (voice_profile or {}).get("traits", [])
+    voice_notes = (voice_profile or {}).get("notes", "")
+
+    new_draft = await tone_service.rewrite_tone(thread["draft"], body.tone, voice_traits, voice_notes)
+
+    doc = await db.threads.find_one_and_update(
+        {"_id": thread_id},
+        {
+            "$set": {"draft": new_draft},
+            "$push": {"version_stack": thread["draft"]},
+        },
+        return_document=True,
+    )
+    return _thread_response(doc)
+
+
+@router.post("/{thread_id}/revert")
+async def revert_thread(thread_id: str, role=Depends(require_role), db=Depends(get_db)):
+    thread = await db.threads.find_one({"_id": thread_id})
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    version_stack = thread.get("version_stack", [])
+    if not version_stack:
+        raise HTTPException(status_code=409, detail="No prior version to revert to")
+
+    prior_draft = version_stack[-1]
+    remaining_stack = version_stack[:-1]
+
+    doc = await db.threads.find_one_and_update(
+        {"_id": thread_id},
+        {"$set": {"draft": prior_draft, "version_stack": remaining_stack}},
+        return_document=True,
+    )
+    return _thread_response(doc)

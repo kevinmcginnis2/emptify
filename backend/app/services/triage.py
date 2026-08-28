@@ -51,7 +51,7 @@ def _voice_why(voice_mode: str, domain: str) -> str:
 
 _TRIAGE_TOOL = {
     "name": "emit_triage",
-    "description": "Classify an inbound email for an executive's triage inbox.",
+    "description": "Classify an inbound email for an executive's triage inbox and draft a reply.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -59,13 +59,30 @@ _TRIAGE_TOOL = {
             "reason": {"type": "string"},
             "handoff_suggested": {"type": "boolean"},
             "handoff_reason": {"type": "string"},
+            "draft": {"type": "string"},
         },
-        "required": ["bucket", "reason", "handoff_suggested", "handoff_reason"],
+        "required": ["bucket", "reason", "handoff_suggested", "handoff_reason", "draft"],
     },
 }
 
 
-def _classify_thread_sync(subject: str, from_name: str, from_email: str, body: str, today_str: str) -> dict:
+def _voice_profile_clause(voice_traits: list[dict], voice_notes: str) -> str:
+    if not voice_traits:
+        return "No voice profile is available yet — write the reply in a neutral, professional voice."
+    traits_joined = "; ".join(f"{t['label']}: {t['value']}" for t in voice_traits)
+    notes_clause = f" Additional guidance: {voice_notes}" if voice_notes else ""
+    return f"Write the reply matching this voice profile — {traits_joined}.{notes_clause}"
+
+
+def _classify_thread_sync(
+    subject: str,
+    from_name: str,
+    from_email: str,
+    body: str,
+    today_str: str,
+    voice_traits: list[dict],
+    voice_notes: str,
+) -> dict:
     client = Anthropic(api_key=settings.anthropic_api_key)
     prompt = (
         f"Today's date is {today_str}. Classify this inbound email for a busy executive's triage "
@@ -76,11 +93,13 @@ def _classify_thread_sync(subject: str, from_name: str, from_email: str, body: s
         "details from the email, not generic language. Then decide whether this looks like something "
         "an executive assistant usually handles on the exec's behalf (e.g. scheduling requests, "
         "routine logistics) — if so, set handoff_suggested true with a short handoff_reason; "
-        "otherwise false with an empty handoff_reason."
+        "otherwise false with an empty handoff_reason. "
+        "Finally, write a complete, ready-to-send draft reply to this email, addressing its specific "
+        f"content. {_voice_profile_clause(voice_traits, voice_notes)}"
     )
     resp = client.messages.create(
         model=settings.anthropic_model,
-        max_tokens=512,
+        max_tokens=1024,
         tools=[_TRIAGE_TOOL],
         tool_choice={"type": "tool", "name": "emit_triage"},
         messages=[{"role": "user", "content": prompt}],
@@ -88,12 +107,21 @@ def _classify_thread_sync(subject: str, from_name: str, from_email: str, body: s
     for block in resp.content:
         if block.type == "tool_use":
             return block.input
-    return {"bucket": "wait", "reason": "", "handoff_suggested": False, "handoff_reason": ""}
+    return {"bucket": "wait", "reason": "", "handoff_suggested": False, "handoff_reason": "", "draft": ""}
 
 
-async def classify_thread(subject: str, from_name: str, from_email: str, body: str) -> dict:
+async def classify_thread(
+    subject: str,
+    from_name: str,
+    from_email: str,
+    body: str,
+    voice_traits: list[dict],
+    voice_notes: str,
+) -> dict:
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    return await asyncio.to_thread(_classify_thread_sync, subject, from_name, from_email, body, today_str)
+    return await asyncio.to_thread(
+        _classify_thread_sync, subject, from_name, from_email, body, today_str, voice_traits, voice_notes
+    )
 
 
 async def sync_account_board(account: dict) -> None:
@@ -129,12 +157,18 @@ async def sync_account_board(account: dict) -> None:
         from_name, from_email = _parse_from(headers.get("from", ""))
         latest_body = messages[-1]["body"]
 
-        classification = await classify_thread(subject, from_name, from_email, latest_body)
-
         domain_match = re.search(r"@([\w.-]+)", from_email)
         domain = domain_match.group(1).lower() if domain_match else ""
         voice_mode = classify_domain(from_email, account.get("internal_domains", ""))
         voice_why = _voice_why(voice_mode, domain)
+
+        voice_profile = await db.voice_profiles.find_one({"_id": voice_mode})
+        voice_traits = (voice_profile or {}).get("traits", [])
+        voice_notes = (voice_profile or {}).get("notes", "")
+
+        classification = await classify_thread(
+            subject, from_name, from_email, latest_body, voice_traits, voice_notes
+        )
 
         doc = {
             "_id": gmail_thread_id,
@@ -149,7 +183,7 @@ async def sync_account_board(account: dict) -> None:
             "voice_mode": voice_mode,
             "voice_why": voice_why,
             "messages": messages,
-            "draft": "",
+            "draft": classification.get("draft", ""),
             "draft_author": "emptify",
             "version_stack": [],
             "handoff_suggested": classification.get("handoff_suggested", False),

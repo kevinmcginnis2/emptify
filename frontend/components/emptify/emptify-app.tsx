@@ -12,7 +12,6 @@ import { HandoffDialog } from "./handoff-dialog";
 import { ConfirmSendDialog } from "./confirm-send-dialog";
 import { EmptifyToast } from "./toast";
 import * as api from "@/lib/emptify/api";
-import { toneData } from "@/lib/emptify/data";
 import {
   Account,
   AccountId,
@@ -30,13 +29,12 @@ import {
 
 const DOMAINS_DEBOUNCE_MS = 500;
 const NOTES_DEBOUNCE_MS = 500;
+const DRAFT_DEBOUNCE_MS = 500;
 const VOICE_POLL_MS = 2000;
 const RESTORABLE_SCREENS: Screen[] = ["board", "voice", "connect", "queue", "ready"];
 
 const EMPTY_VOICE_PROFILE = { sampleSize: "Loading…", rebuilding: false, notes: "", traits: [] };
 const EMPTY_VOICE_STATE: VoiceState = { client: EMPTY_VOICE_PROFILE, internal: EMPTY_VOICE_PROFILE };
-
-const TONE_DATA = toneData();
 
 export function EmptifyApp() {
   const [role, setRole] = useState<Role>("exec");
@@ -57,17 +55,17 @@ export function EmptifyApp() {
   const [toneLoading, setToneLoading] = useState<ToneLoadingState | null>(null);
 
   const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const toneTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const domainsTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const notesTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const draftTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const voicePollIntervals = useRef<Record<string, ReturnType<typeof setInterval>>>({});
 
   useEffect(() => {
     return () => {
       if (undoTimer.current) clearTimeout(undoTimer.current);
-      if (toneTimer.current) clearTimeout(toneTimer.current);
       Object.values(domainsTimers.current).forEach(clearTimeout);
       Object.values(notesTimers.current).forEach(clearTimeout);
+      Object.values(draftTimers.current).forEach(clearTimeout);
       Object.values(voicePollIntervals.current).forEach(clearInterval);
     };
   }, []);
@@ -160,8 +158,18 @@ export function EmptifyApp() {
   }, [detailOrigin]);
 
   const updateDraft = useCallback(
-    (id: string, val: string) => updateEmail(id, { draft: val }),
-    [updateEmail],
+    (id: string, val: string) => {
+      updateEmail(id, { draft: val });
+
+      if (draftTimers.current[id]) clearTimeout(draftTimers.current[id]);
+      draftTimers.current[id] = setTimeout(() => {
+        delete draftTimers.current[id];
+        api.patchDraft(id, val, role).catch(() => {
+          showToast("Couldn't save draft — try again.", false);
+        });
+      }, DRAFT_DEBOUNCE_MS);
+    },
+    [role, showToast, updateEmail],
   );
 
   const updateNotes = useCallback(
@@ -345,28 +353,25 @@ export function EmptifyApp() {
   const applyTone = useCallback(
     (id: string, tone: Tone) => {
       setToneLoading({ id, tone });
-      if (toneTimer.current) clearTimeout(toneTimer.current);
-      toneTimer.current = setTimeout(() => {
-        const em = getEmail(id);
-        if (em) {
-          const variant = TONE_DATA[id]?.[tone] ?? em.draft;
-          updateEmail(id, { draft: variant, versionStack: [...em.versionStack, em.draft] });
-        }
-        setToneLoading(null);
-      }, 550);
+      api
+        .postTone(id, tone, role)
+        .then((updated) => updateEmail(id, updated))
+        .catch(() => showToast("Couldn't rewrite — try again.", false))
+        .finally(() => setToneLoading(null));
     },
-    [getEmail, updateEmail],
+    [role, showToast, updateEmail],
   );
 
   const revertTone = useCallback(
     (id: string) => {
       const em = getEmail(id);
       if (!em || em.versionStack.length === 0) return;
-      const stack = em.versionStack.slice();
-      const prev = stack.pop() as string;
-      updateEmail(id, { draft: prev, versionStack: stack });
+      api
+        .postRevert(id, role)
+        .then((updated) => updateEmail(id, updated))
+        .catch(() => showToast("Couldn't revert — try again.", false));
     },
-    [getEmail, updateEmail],
+    [getEmail, role, showToast, updateEmail],
   );
 
   const boardEmails = useMemo(

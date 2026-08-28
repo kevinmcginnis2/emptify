@@ -1,4 +1,4 @@
-import { Account, EmailThread, Role, VoiceMode, VoiceProfile, VoiceState } from "./types";
+import { Account, EmailThread, Role, Tone, VoiceMode, VoiceProfile, VoiceState } from "./types";
 
 export type ThreadListStatus = "board" | "withEA" | "readyToSend";
 
@@ -80,4 +80,27 @@ export async function getThreads(status: ThreadListStatus, account?: string): Pr
   const params = new URLSearchParams({ status });
   if (account) params.set("account", account);
   return request<EmailThread[]>(`/api/v1/threads?${params.toString()}`);
+}
+
+export async function patchDraft(id: string, draft: string, role: Role): Promise<EmailThread> {
+  return request<EmailThread>(`/api/v1/threads/${id}/draft`, {
+    method: "PATCH",
+    headers: roleHeaders(role),
+    body: JSON.stringify({ draft }),
+  });
+}
+
+export async function postTone(id: string, tone: Tone, role: Role): Promise<EmailThread> {
+  return request<EmailThread>(`/api/v1/threads/${id}/tone`, {
+    method: "POST",
+    headers: roleHeaders(role),
+    body: JSON.stringify({ tone }),
+  });
+}
+
+export async function postRevert(id: string, role: Role): Promise<EmailThread> {
+  return request<EmailThread>(`/api/v1/threads/${id}/revert`, {
+    method: "POST",
+    headers: roleHeaders(role),
+  });
 }
