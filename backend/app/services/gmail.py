@@ -252,7 +252,7 @@ def _get_history_sync(creds: Credentials, start_history_id: str) -> tuple[list[d
                 .list(
                     userId="me",
                     startHistoryId=start_history_id,
-                    historyTypes=["messageAdded", "messageDeleted", "labelAdded"],
+                    historyTypes=["messageAdded", "messageDeleted", "labelAdded", "labelRemoved"],
                     pageToken=page_token,
                 )
                 .execute()

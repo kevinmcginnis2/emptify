@@ -139,6 +139,75 @@ async def classify_thread(
     )
 
 
+_DRAFT_GATE_TOOL = {
+    "name": "emit_draft_decision",
+    "description": "Decide whether an already-triaged email needs a personal reply drafted.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "informational": {
+                "type": "boolean",
+                "description": (
+                    "true if this is a subscription, promotional/marketing email, newsletter, "
+                    "donation/fundraising blast, automated notification or digest, or anything else "
+                    "that doesn't call for a personal reply"
+                ),
+            },
+            "draft": {
+                "type": "string",
+                "description": "A complete, ready-to-send draft reply. Empty string if informational is true.",
+            },
+        },
+        "required": ["informational", "draft"],
+    },
+}
+
+
+def _draft_gate_sync(
+    subject: str,
+    from_name: str,
+    from_email: str,
+    body: str,
+    voice_traits: list[dict],
+    voice_notes: str,
+) -> dict:
+    client = Anthropic(api_key=settings.anthropic_api_key)
+    prompt = (
+        f"From: {from_name} <{from_email}>\nSubject: {subject}\n"
+        f"Body:\n{body[:CLASSIFY_BODY_TRUNCATE]}\n\n"
+        "First decide whether this email is informational (a subscription, promotional/marketing "
+        "email, newsletter, donation/fundraising blast, automated notification, or digest) rather "
+        "than something that calls for a personal reply. If it is informational, set informational "
+        "true and leave draft as an empty string. Otherwise set informational false and write a "
+        f"complete, ready-to-send draft reply addressing its specific content. "
+        f"{_voice_profile_clause(voice_traits, voice_notes)}"
+    )
+    resp = client.messages.create(
+        model=settings.anthropic_model,
+        max_tokens=1024,
+        tools=[_DRAFT_GATE_TOOL],
+        tool_choice={"type": "tool", "name": "emit_draft_decision"},
+        messages=[{"role": "user", "content": prompt}],
+    )
+    for block in resp.content:
+        if block.type == "tool_use":
+            return block.input
+    return {"informational": False, "draft": ""}
+
+
+async def decide_draft(
+    subject: str,
+    from_name: str,
+    from_email: str,
+    body: str,
+    voice_traits: list[dict],
+    voice_notes: str,
+) -> dict:
+    return await asyncio.to_thread(
+        _draft_gate_sync, subject, from_name, from_email, body, voice_traits, voice_notes
+    )
+
+
 def _classification_fields(
     full_thread: dict, messages: list[dict], account: dict
 ) -> tuple[dict, str, str]:
@@ -265,7 +334,9 @@ async def _resync_existing_thread(db, account: dict, creds, thread_id: str) -> N
     )
 
 
-async def _mark_deleted_in_gmail(db, thread_id: str, account: dict) -> None:
+async def _mark_deleted_in_gmail(
+    db, thread_id: str, account: dict, detail: str = "Message deleted/trashed directly in Gmail."
+) -> None:
     doc = await db.threads.find_one_and_update(
         {"_id": thread_id, "status": {"$ne": "archived"}},
         {"$set": {"status": "archived"}},
@@ -278,7 +349,7 @@ async def _mark_deleted_in_gmail(db, thread_id: str, account: dict) -> None:
             actor="Emptify Sync",
             action="sync_archive",
             account_email=account["email"],
-            detail="Message deleted/trashed directly in Gmail.",
+            detail=detail,
         )
 
 
@@ -332,6 +403,7 @@ async def sync_account_board(account: dict) -> None:
     new_thread_ids: set[str] = set()
     touched_thread_ids: set[str] = set()
     deleted_thread_ids: set[str] = set()
+    removed_from_inbox_ids: set[str] = set()
 
     for record in records:
         for added in record.get("messagesAdded", []):
@@ -357,14 +429,28 @@ async def sync_account_board(account: dict) -> None:
                 thread_id = label_change.get("message", {}).get("threadId")
                 if thread_id:
                     deleted_thread_ids.add(thread_id)
+        for label_change in record.get("labelsRemoved", []):
+            if "INBOX" in (label_change.get("labelIds") or []):
+                thread_id = label_change.get("message", {}).get("threadId")
+                if thread_id:
+                    removed_from_inbox_ids.add(thread_id)
+
+    removed_from_inbox_ids -= deleted_thread_ids
 
     for thread_id in deleted_thread_ids:
         await _mark_deleted_in_gmail(db, thread_id, account)
 
-    for thread_id in new_thread_ids - deleted_thread_ids:
+    for thread_id in removed_from_inbox_ids:
+        await _mark_deleted_in_gmail(
+            db, thread_id, account, detail="Message archived/removed from Inbox directly in Gmail."
+        )
+
+    all_removed_ids = deleted_thread_ids | removed_from_inbox_ids
+
+    for thread_id in new_thread_ids - all_removed_ids:
         await _ingest_new_thread(db, account, creds, thread_id)
 
-    for thread_id in touched_thread_ids - deleted_thread_ids:
+    for thread_id in touched_thread_ids - all_removed_ids:
         await _resync_existing_thread(db, account, creds, thread_id)
 
     await db.accounts.update_one({"_id": account["_id"]}, {"$set": {"history_id": new_history_id}})
