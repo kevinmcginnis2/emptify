@@ -1,4 +1,4 @@
-import { Account, Role } from "./types";
+import { Account, Role, VoiceMode, VoiceProfile, VoiceState } from "./types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -53,4 +53,23 @@ export async function reconnectAccount(id: string, role: Role): Promise<string> 
     headers: roleHeaders(role),
   });
   return authUrl;
+}
+
+export async function getVoice(): Promise<VoiceState> {
+  return request<VoiceState>("/api/v1/voice");
+}
+
+export async function patchVoiceNotes(mode: VoiceMode, notes: string, role: Role): Promise<VoiceProfile> {
+  return request<VoiceProfile>(`/api/v1/voice/${mode}`, {
+    method: "PATCH",
+    headers: roleHeaders(role),
+    body: JSON.stringify({ notes }),
+  });
+}
+
+export async function rebuildVoice(mode: VoiceMode, role: Role): Promise<VoiceProfile> {
+  return request<VoiceProfile>(`/api/v1/voice/${mode}/rebuild`, {
+    method: "POST",
+    headers: roleHeaders(role),
+  });
 }

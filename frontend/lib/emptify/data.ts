@@ -1,4 +1,4 @@
-import { EmailThread, ToneData, VoiceState } from "./types";
+import { EmailThread, ToneData } from "./types";
 
 export const ACCOUNT_LABELS: Record<string, string> = {
   kestrel: "Kestrel Partners",
@@ -263,37 +263,6 @@ export function initialEmails(): EmailThread[] {
       draftAtHandoff: "Sana — following up, does Thursday still work? — Mara",
     },
   ];
-}
-
-export function initialVoice(): VoiceState {
-  return {
-    client: {
-      sampleSize: "58 of 214 sent emails (last 90 days)",
-      rebuilding: false,
-      notes: "Keep replies to clients short. Always end with a next step.",
-      traits: [
-        { label: "Sentence length", value: "Short — averages 14 words per sentence" },
-        { label: "Greeting", value: "First name only, no salutation line ('Priya —')" },
-        { label: "Sign-off", value: "First name, no closing line ('— Mara')" },
-        { label: "Formality", value: "Direct and businesslike, minimal small talk" },
-        { label: "Hedging", value: "Rare — states positions plainly" },
-        { label: "Characteristic phrases", value: "'happy to', 'let's find a time', 'stay on track'" },
-      ],
-    },
-    internal: {
-      sampleSize: "36 of 214 sent emails (last 90 days)",
-      rebuilding: false,
-      notes: "Fine to be a little less terse with the board and staff than with clients.",
-      traits: [
-        { label: "Sentence length", value: "Slightly longer — averages 19 words per sentence" },
-        { label: "Greeting", value: "Opens with 'Hi all' or 'Hi [name]' for groups" },
-        { label: "Sign-off", value: "First name only, occasionally none at all" },
-        { label: "Formality", value: "Collegial, slightly more procedural language" },
-        { label: "Hedging", value: "Occasional — 'happy to', 'let me know either way'" },
-        { label: "Characteristic phrases", value: "'happy to discuss', 'let me know either way', 'no concerns on my end'" },
-      ],
-    },
-  };
 }
 
 export function toneData(): ToneData {

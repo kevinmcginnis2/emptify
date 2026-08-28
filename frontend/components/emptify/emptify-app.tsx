@@ -12,7 +12,7 @@ import { HandoffDialog } from "./handoff-dialog";
 import { ConfirmSendDialog } from "./confirm-send-dialog";
 import { EmptifyToast } from "./toast";
 import * as api from "@/lib/emptify/api";
-import { initialEmails, initialVoice, toneData } from "@/lib/emptify/data";
+import { initialEmails, toneData } from "@/lib/emptify/data";
 import {
   Account,
   AccountId,
@@ -25,10 +25,16 @@ import {
   Tone,
   ToneLoadingState,
   VoiceMode,
+  VoiceState,
 } from "@/lib/emptify/types";
 
 const DOMAINS_DEBOUNCE_MS = 500;
+const NOTES_DEBOUNCE_MS = 500;
+const VOICE_POLL_MS = 2000;
 const RESTORABLE_SCREENS: Screen[] = ["board", "voice", "connect", "queue", "ready"];
+
+const EMPTY_VOICE_PROFILE = { sampleSize: "Loading…", rebuilding: false, notes: "", traits: [] };
+const EMPTY_VOICE_STATE: VoiceState = { client: EMPTY_VOICE_PROFILE, internal: EMPTY_VOICE_PROFILE };
 
 const TONE_DATA = toneData();
 
@@ -42,7 +48,7 @@ export function EmptifyApp() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [connecting, setConnecting] = useState(false);
   const [emails, setEmails] = useState(initialEmails);
-  const [voice, setVoice] = useState(initialVoice);
+  const [voice, setVoice] = useState<VoiceState>(EMPTY_VOICE_STATE);
 
   const [toast, setToast] = useState<ToastState | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
@@ -52,17 +58,22 @@ export function EmptifyApp() {
   const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const toneTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const domainsTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const notesTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const voicePollIntervals = useRef<Record<string, ReturnType<typeof setInterval>>>({});
 
   useEffect(() => {
     return () => {
       if (undoTimer.current) clearTimeout(undoTimer.current);
       if (toneTimer.current) clearTimeout(toneTimer.current);
       Object.values(domainsTimers.current).forEach(clearTimeout);
+      Object.values(notesTimers.current).forEach(clearTimeout);
+      Object.values(voicePollIntervals.current).forEach(clearInterval);
     };
   }, []);
 
   useEffect(() => {
     api.getAccounts().then(setAccounts).catch(() => {});
+    api.getVoice().then(setVoice).catch(() => {});
 
     const requested = new URLSearchParams(window.location.search).get("screen");
     if (requested && RESTORABLE_SCREENS.includes(requested as Screen)) {
@@ -126,20 +137,53 @@ export function EmptifyApp() {
     [updateEmail],
   );
 
-  const updateNotes = useCallback((which: VoiceMode, val: string) => {
-    setVoice((prev) => ({ ...prev, [which]: { ...prev[which], notes: val } }));
-  }, []);
+  const updateNotes = useCallback(
+    (which: VoiceMode, val: string) => {
+      setVoice((prev) => ({ ...prev, [which]: { ...prev[which], notes: val } }));
 
-  const rebuildVoice = useCallback((which: VoiceMode) => {
-    setVoice((prev) => ({ ...prev, [which]: { ...prev[which], rebuilding: true } }));
-    setTimeout(() => {
-      setVoice((prev) => ({ ...prev, [which]: { ...prev[which], rebuilding: false } }));
-      showToast(
-        `Rebuilt the ${which === "client" ? "client-facing" : "internal"} voice profile from the last 90 days.`,
-        false,
-      );
-    }, 900);
-  }, [showToast]);
+      if (notesTimers.current[which]) clearTimeout(notesTimers.current[which]);
+      notesTimers.current[which] = setTimeout(() => {
+        delete notesTimers.current[which];
+        api.patchVoiceNotes(which, val, role).catch(() => {
+          showToast("Couldn't save notes — try again.", false);
+        });
+      }, NOTES_DEBOUNCE_MS);
+    },
+    [role, showToast],
+  );
+
+  const rebuildVoice = useCallback(
+    (which: VoiceMode) => {
+      api
+        .rebuildVoice(which, role)
+        .then((profile) => {
+          setVoice((prev) => ({ ...prev, [which]: profile }));
+
+          if (voicePollIntervals.current[which]) clearInterval(voicePollIntervals.current[which]);
+          voicePollIntervals.current[which] = setInterval(() => {
+            api
+              .getVoice()
+              .then((next) => {
+                setVoice(next);
+                if (!next[which].rebuilding) {
+                  clearInterval(voicePollIntervals.current[which]);
+                  delete voicePollIntervals.current[which];
+                  showToast(
+                    `Rebuilt the ${which === "client" ? "client-facing" : "internal"} voice profile from the last 90 days.`,
+                    false,
+                  );
+                }
+              })
+              .catch(() => {
+                clearInterval(voicePollIntervals.current[which]);
+                delete voicePollIntervals.current[which];
+              });
+          }, VOICE_POLL_MS);
+        })
+        .catch(() => showToast("Couldn't start rebuilding — try again.", false));
+    },
+    [role, showToast],
+  );
 
   const updateDomains = useCallback(
     (accId: string, val: string) => {

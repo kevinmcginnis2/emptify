@@ -131,3 +131,43 @@ async def send_message(
     gmail_thread_id: str | None = None,
 ) -> None:
     await asyncio.to_thread(_send_message_sync, creds, to_email, subject, body_text, gmail_thread_id)
+
+
+def _list_sent_sync(creds: Credentials, since_date: str, max_results: int) -> tuple[list[str], int]:
+    service = build("gmail", "v1", credentials=creds)
+    query = f"in:sent after:{since_date}"
+    message_ids: list[str] = []
+    page_token = None
+    total_estimate = 0
+    while len(message_ids) < max_results:
+        resp = (
+            service.users()
+            .messages()
+            .list(
+                userId="me",
+                q=query,
+                maxResults=min(100, max_results - len(message_ids)),
+                pageToken=page_token,
+            )
+            .execute()
+        )
+        if page_token is None:
+            total_estimate = resp.get("resultSizeEstimate", 0)
+        message_ids.extend(m["id"] for m in resp.get("messages", []))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return message_ids, total_estimate
+
+
+async def list_sent_since(creds: Credentials, since_date: str, max_results: int = 60) -> tuple[list[str], int]:
+    return await asyncio.to_thread(_list_sent_sync, creds, since_date, max_results)
+
+
+def _get_message_full_sync(creds: Credentials, message_id: str) -> dict:
+    service = build("gmail", "v1", credentials=creds)
+    return service.users().messages().get(userId="me", id=message_id, format="full").execute()
+
+
+async def get_message_full(creds: Credentials, message_id: str) -> dict:
+    return await asyncio.to_thread(_get_message_full_sync, creds, message_id)
