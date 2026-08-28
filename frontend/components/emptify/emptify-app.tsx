@@ -31,6 +31,7 @@ const DOMAINS_DEBOUNCE_MS = 500;
 const NOTES_DEBOUNCE_MS = 500;
 const DRAFT_DEBOUNCE_MS = 500;
 const VOICE_POLL_MS = 2000;
+const AUTO_REFRESH_MS = 30000;
 const RESTORABLE_SCREENS: Screen[] = ["board", "voice", "connect", "queue", "ready"];
 
 const EMPTY_VOICE_PROFILE = { sampleSize: "Loading…", rebuilding: false, notes: "", traits: [] };
@@ -112,36 +113,84 @@ export function EmptifyApp() {
   // first mount — is what actually picks up newly-arrived mail. A sync with
   // a backlog of new mail can take a while (one real Gmail fetch + one real
   // Claude call per new message, processed one at a time), so boardLoading
-  // gives the screen something to show instead of looking stuck.
+  // gives the screen something to show instead of looking stuck. `silent`
+  // skips that indicator for the background auto-refresh poll below, so it
+  // doesn't flash on every tick.
+  const refreshBoard = useCallback(
+    (silent = false) => {
+      if (!silent) setBoardLoading(true);
+      return api
+        .getThreads("board", accountFilter === "all" ? undefined : accountFilter)
+        .then((boardEmails) => {
+          setEmails((prev) => [...prev.filter((e) => e.status !== "board"), ...boardEmails]);
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (!silent) setBoardLoading(false);
+        });
+    },
+    [accountFilter]
+  );
+
   useEffect(() => {
     if (screen !== "board") return;
-    setBoardLoading(true);
-    api
-      .getThreads("board", accountFilter === "all" ? undefined : accountFilter)
-      .then((boardEmails) => {
-        setEmails((prev) => [...prev.filter((e) => e.status !== "board"), ...boardEmails]);
-      })
-      .catch(() => {})
-      .finally(() => setBoardLoading(false));
-  }, [screen, accountFilter]);
+    refreshBoard();
+  }, [screen, refreshBoard]);
 
   // Queue/Ready are visible (read-only for the non-owning role) from both
   // roles' nav bars now, so refetch whichever one is being visited to keep
   // it current — mirrors the board's per-visit refetch above, minus the
   // sync (withEA/readyToSend are plain Mongo reads, no Gmail call).
-  useEffect(() => {
-    if (screen === "queue") {
+  const refreshQueue = useCallback(
+    () =>
       api
         .getThreads("withEA")
         .then((list) => setEmails((prev) => [...prev.filter((e) => e.status !== "withEA"), ...list]))
-        .catch(() => {});
-    } else if (screen === "ready") {
+        .catch(() => {}),
+    []
+  );
+  const refreshReady = useCallback(
+    () =>
       api
         .getThreads("readyToSend")
         .then((list) => setEmails((prev) => [...prev.filter((e) => e.status !== "readyToSend"), ...list]))
-        .catch(() => {});
-    }
-  }, [screen]);
+        .catch(() => {}),
+    []
+  );
+
+  useEffect(() => {
+    if (screen === "queue") refreshQueue();
+    else if (screen === "ready") refreshReady();
+  }, [screen, refreshQueue, refreshReady]);
+
+  // Auto-refresh: exec and EA often have the same screen open in separate
+  // sessions at once, so without this, one person's action (send, archive,
+  // handoff) stays invisible to the other until they navigate away and back.
+  // Polls quietly in the background while board/queue/ready is the active
+  // screen, paused while the tab isn't visible (no point paying for a real
+  // Gmail+Claude sync nobody's looking at), and refreshes immediately the
+  // moment the tab regains focus so switching back always shows current data.
+  useEffect(() => {
+    if (screen !== "board" && screen !== "queue" && screen !== "ready") return;
+
+    const tick = (silent: boolean) => {
+      if (document.hidden) return;
+      if (screen === "board") refreshBoard(silent);
+      else if (screen === "queue") refreshQueue();
+      else if (screen === "ready") refreshReady();
+    };
+
+    const intervalId = setInterval(() => tick(true), AUTO_REFRESH_MS);
+    const onVisible = () => {
+      if (!document.hidden) tick(true);
+    };
+    document.addEventListener("visibilitychange", onVisible);
+
+    return () => {
+      clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [screen, refreshBoard, refreshQueue, refreshReady]);
 
   const getEmail = useCallback((id: string) => emails.find((e) => e.id === id), [emails]);
 
