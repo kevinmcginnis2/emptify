@@ -29,7 +29,7 @@
 - Nav bar: role toggle (Exec/EA), With EA count, Ready to send count
 - Audit log (not a screen, but explicitly required by the PRD as an output covering the full handoff → edit → mark-ready → send chain)
 
-**Explicitly out of scope (per PRD "What to leave out for now"):** autonomous sending, assistant sending, permission tiers, delete/unsubscribe, freeform tone box, a 4th tone preset, Microsoft 365, real user accounts/invites/auth, learning from edits over time, calendar/scheduling/tasks/CRM, search/labels/attachments/snooze/scheduled send, more than 2 voice modes, mobile.
+**Explicitly out of scope (per PRD "What to leave out for now"):** autonomous sending (no AI ever sends without an explicit human click — see the S8 revision note below for why "assistant sending" specifically was later relaxed), permission tiers, delete/unsubscribe, freeform tone box, a 4th tone preset, Microsoft 365, real user accounts/invites/auth, learning from edits over time, calendar/scheduling/tasks/CRM, search/labels/attachments/snooze/scheduled send, more than 2 voice modes, mobile.
 
 **Success Criteria:**
 - All frontend features functional end-to-end against the real backend, dummy data fully replaced
@@ -401,23 +401,26 @@ Note: `JWT_SECRET` / `JWT_EXPIRES_IN` from the generic template are intentionall
 
 ### 🤝 S8 — Handoff Loop & EA Queue
 
-**Objectives:** the PRD's differentiator — hand off, EA edits and marks ready, exec sends from the return lane.
+**Objectives:** the PRD's differentiator — hand off, EA edits and marks ready, exec sends from the return lane. **Expanded mid-sprint** after a real product conversation while building it: the original PRD's "no assistant sending" descope (see Executive Summary / Section 2) turned out to be too strict for how an EA relationship actually works — an EA often just finishes the job rather than always looping back. Decided: once a thread is `withEA`, the EA gets *both* paths, their judgment per thread — Mark ready (loop back to exec) **or** Send/Archive/Skip it directly, using the exact same connected-account Gmail machinery already built (no separate EA-owned mailbox/identity — the EA operates the same account the exec always has). Also added: mutual read-only monitoring — the exec can see the EA's queue (no Mark Ready button), the EA can see "Ready to send" (no Send button), neither gaining new authority, just visibility. Reply-all/CC support was raised in the same conversation and explicitly deferred — noted in the S9 section below.
 
 **Tasks:**
-- Implement `POST /threads/{id}/handoff` + `HandoffDialog` wiring
+- Implement `POST /threads/{id}/handoff` + `HandoffDialog` wiring (exec-only, unchanged from original scope)
   - Manual Test Step: as Exec, hand off a board card with a note, confirm it disappears from the board and the With EA count in the nav bar increments
   - User Test Prompt: "Hand a card to EA with a note and confirm it leaves the board and the 'With EA' count goes up by one."
-- Implement `GET /threads?status=withEA` for `QueueScreen`
-  - Manual Test Step: switch role to EA, open the queue, confirm the handed-off card shows the exec's note and current draft
-  - User Test Prompt: "Switch to the EA role, open the queue, and confirm you see the note and draft for the card you just handed off."
-- Implement `POST /threads/{id}/mark-ready` with `eaChangeSummary` diffing
-  - Manual Test Step: as EA, edit the draft and click Mark ready, confirm it leaves the queue
+- Implement `GET /threads?status=withEA` for `QueueScreen`, now visible (read-only for Exec, actionable for EA) to both roles via a clickable nav link
+  - Manual Test Step: switch role to EA, open the queue, confirm the handed-off card shows the exec's note and current draft; switch back to Exec, confirm "With EA" is now a clickable link into the same queue, read-only (no Mark Ready button)
+  - User Test Prompt: "Switch to the EA role, open the queue, and confirm you see the note and draft for the card you just handed off. Then switch back to Exec and confirm you can click into the same queue to check on it, without being able to act on it."
+- Implement `POST /threads/{id}/mark-ready` with a **real Anthropic-generated** `eaChangeSummary` (diffing `draftAtHandoff` against the final draft; short-circuits to "Reviewed as-is — no changes." with no LLM call when nothing changed)
+  - Manual Test Step: as EA, edit the draft and click Mark ready, confirm it leaves the queue and the summary shown to the exec is specific, not generic
   - User Test Prompt: "As EA, tweak the draft and click Mark ready, and confirm it disappears from your queue."
-- Implement `GET /threads?status=readyToSend` for `ReadyScreen`
-  - Manual Test Step: switch back to Exec, open Ready to send, confirm the card appears with a sensible change summary, then send it through the normal confirm/undo flow
-  - User Test Prompt: "Switch back to Exec, open Ready to send, confirm the card is there with a summary of what changed, then send it and confirm it lands in Sent."
+- Implement `GET /threads?status=readyToSend` for `ReadyScreen`, now visible (actionable for Exec, read-only for EA) to both roles via a clickable nav link (new for EA — didn't exist before this sprint)
+  - Manual Test Step: switch back to Exec, open Ready to send, confirm the card appears with a sensible change summary, then send it through the normal confirm/undo flow; switch to EA, confirm a new "Ready to send" link exists and shows the same card read-only (no Send button)
+  - User Test Prompt: "Switch back to Exec, open Ready to send, confirm the card is there with a summary of what changed, then send it and confirm it lands in Sent. Then switch to EA and confirm you can now check whether it's been sent."
+- **New:** relax `send`/`archive`/`skip` to also accept `X-Role: ea` when the thread is `withEA` (additive — exec's existing permissions on `board`/`readyToSend` are unchanged; EA still can't act on a `board` thread, exec still can't act on a `withEA` one)
+  - Manual Test Step: hand a card to EA, then as EA send/archive/skip it directly without ever clicking Mark ready; confirm the real Gmail effect happens and the audit log attributes it to Theo Banks, not Mara Lindqvist
+  - User Test Prompt: "Hand a card to EA, then as EA send it directly instead of marking it ready. Confirm it actually sends and the audit log shows Theo did it."
 
-**Definition of Done:** the full handoff → edit → mark-ready → send loop works end-to-end across both roles, with every step reflected in the audit log. Push to `main`.
+**Definition of Done:** the full handoff → (edit → mark-ready → send) **or** (EA sends/archives/skips directly) loop works end-to-end across both roles, both roles can monitor the other's queue read-only, and every step is reflected in the audit log with the correct actor. Push to `main`.
 
 ---
 
@@ -430,5 +433,6 @@ Note: `JWT_SECRET` / `JWT_EXPIRES_IN` from the generic template are intentionall
 - OAuth tokens are stored as plaintext strings in Mongo (`backend/app/models/account.py`), per the PRD's no-hardening-in-v1 stance — noted explicitly as a known simplification in S2. Revisit if this ever needs to be more than a local dev tool.
 - No CSRF `state` verification on the OAuth callback (`backend/app/api/v1/accounts.py`) — Google round-trips `state` but it's never checked against anything, since there's no session store. Noted in S2.
 - Per-message classification during board sync is sequential (`triage.py`'s `sync_account_board` — one real Gmail fetch + one real Claude call per new message, in a loop). A sync with a backlog of a dozen-plus new messages can take over a minute; the S5 "Syncing…" indicator makes this visible but doesn't make it faster. Worth parallelizing (e.g. `asyncio.gather` over a small batch) if backlogs turn out to be common in practice.
+- **Reply-all / CC support.** Raised during the S8 discussion about EA direct-send, then explicitly deferred rather than bundled into that sprint. Every reply anywhere in the app (Exec's or EA's) is single-recipient today — `triage.py` only ever parses `From`/`Reply-To` off the latest inbound message, `gmail.send_message` only accepts one `to_email`, and the confirm-send dialog only shows one address. Real scope: parse `Cc` off inbound messages and store it on the thread, thread it through `send_message`/the confirm dialog, and decide whether reply-all is the default or an opt-in per thread.
 
 **Definition of Done:** TBD once scoped — likely starts with a product conversation about the two intentional-deletion/reply-outside-the-app behaviors above, same as the S1/S2/S4 scope questions earlier in this build.

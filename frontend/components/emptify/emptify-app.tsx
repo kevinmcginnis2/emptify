@@ -73,6 +73,14 @@ export function EmptifyApp() {
   useEffect(() => {
     api.getAccounts().then(setAccounts).catch(() => {});
     api.getVoice().then(setVoice).catch(() => {});
+    api
+      .getThreads("withEA")
+      .then((list) => setEmails((prev) => [...prev.filter((e) => e.status !== "withEA"), ...list]))
+      .catch(() => {});
+    api
+      .getThreads("readyToSend")
+      .then((list) => setEmails((prev) => [...prev.filter((e) => e.status !== "readyToSend"), ...list]))
+      .catch(() => {});
 
     const params = new URLSearchParams(window.location.search);
     const requestedScreen = params.get("screen");
@@ -116,6 +124,24 @@ export function EmptifyApp() {
       .catch(() => {})
       .finally(() => setBoardLoading(false));
   }, [screen, accountFilter]);
+
+  // Queue/Ready are visible (read-only for the non-owning role) from both
+  // roles' nav bars now, so refetch whichever one is being visited to keep
+  // it current — mirrors the board's per-visit refetch above, minus the
+  // sync (withEA/readyToSend are plain Mongo reads, no Gmail call).
+  useEffect(() => {
+    if (screen === "queue") {
+      api
+        .getThreads("withEA")
+        .then((list) => setEmails((prev) => [...prev.filter((e) => e.status !== "withEA"), ...list]))
+        .catch(() => {});
+    } else if (screen === "ready") {
+      api
+        .getThreads("readyToSend")
+        .then((list) => setEmails((prev) => [...prev.filter((e) => e.status !== "readyToSend"), ...list]))
+        .catch(() => {});
+    }
+  }, [screen]);
 
   const getEmail = useCallback((id: string) => emails.find((e) => e.id === id), [emails]);
 
@@ -269,20 +295,19 @@ export function EmptifyApp() {
   const submitHandoff = useCallback(() => {
     if (!handoffDialog) return;
     const { emailId, note } = handoffDialog;
-    const em = getEmail(emailId);
-    if (!em) return;
-    updateEmail(emailId, {
-      status: "withEA",
-      eaNote: note || "Handed off from the board.",
-      draftAtHandoff: em.draft,
-    });
-    setHandoffDialog(null);
-    if (screen === "detail") {
-      setScreen(detailOrigin);
-      setSelectedId(null);
-    }
-    showToast("Handed to Theo Banks.", false);
-  }, [handoffDialog, getEmail, updateEmail, screen, detailOrigin, showToast]);
+    api
+      .postHandoff(emailId, note, role)
+      .then((updated) => {
+        updateEmail(emailId, updated);
+        setHandoffDialog(null);
+        if (screen === "detail") {
+          setScreen(detailOrigin);
+          setSelectedId(null);
+        }
+        showToast("Handed to Theo Banks.", false);
+      })
+      .catch(() => showToast("Couldn't hand off — try again.", false));
+  }, [handoffDialog, role, updateEmail, screen, detailOrigin, showToast]);
 
   const openSendConfirm = useCallback((id: string) => setConfirmDialog({ emailId: id }), []);
   const cancelSend = useCallback(() => setConfirmDialog(null), []);
@@ -352,21 +377,19 @@ export function EmptifyApp() {
 
   const markReady = useCallback(
     (id: string) => {
-      const em = getEmail(id);
-      if (!em) return;
-      const changed = em.draft !== em.draftAtHandoff;
-      updateEmail(id, {
-        status: "readyToSend",
-        draftAuthor: "ea",
-        eaChangeSummary: changed ? "Edited the wording before marking ready." : "Reviewed as-is — no changes.",
-      });
-      if (screen === "detail") {
-        setScreen("queue");
-        setSelectedId(null);
-      }
-      showToast("Marked ready — back to Mara's queue.", false);
+      api
+        .postMarkReady(id, role)
+        .then((updated) => {
+          updateEmail(id, updated);
+          if (screen === "detail") {
+            setScreen("queue");
+            setSelectedId(null);
+          }
+          showToast("Marked ready — back to Mara's queue.", false);
+        })
+        .catch(() => showToast("Couldn't mark ready — try again.", false));
     },
-    [getEmail, updateEmail, screen, showToast],
+    [role, updateEmail, screen, showToast],
   );
 
   const applyTone = useCallback(

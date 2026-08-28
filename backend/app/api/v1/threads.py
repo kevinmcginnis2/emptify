@@ -5,9 +5,9 @@ from typing import Literal
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.api.v1.deps import require_exec, require_role
+from app.api.v1.deps import require_ea, require_exec, require_role
 from app.db import get_db
-from app.services import gmail, tone as tone_service
+from app.services import gmail, handoff as handoff_service, tone as tone_service
 from app.services.audit import write_audit_entry
 from app.services.triage import sync_board
 
@@ -24,6 +24,16 @@ class PatchDraftBody(BaseModel):
 
 class ToneBody(BaseModel):
     tone: Literal["shorter", "warmer", "firmer"]
+
+
+class HandoffBody(BaseModel):
+    note: str
+
+
+def _check_actionable(role: str, status: str, exec_statuses: tuple[str, ...]) -> None:
+    allowed = status in exec_statuses if role == "exec" else status == "withEA"
+    if not allowed:
+        raise HTTPException(status_code=409, detail="Thread is not in an actionable status")
 
 
 def _thread_response(doc: dict) -> dict:
@@ -113,15 +123,14 @@ async def dispatch_send(thread_id: str, actor: str) -> None:
 async def send_thread(
     thread_id: str,
     background_tasks: BackgroundTasks,
-    role=Depends(require_exec),
+    role=Depends(require_role),
     db=Depends(get_db),
 ):
-    _role, actor = role
+    role_value, actor = role
     thread = await db.threads.find_one({"_id": thread_id})
     if not thread:
         raise HTTPException(status_code=404, detail="Thread not found")
-    if thread["status"] not in ("board", "readyToSend"):
-        raise HTTPException(status_code=409, detail="Thread is not in a sendable status")
+    _check_actionable(role_value, thread["status"], exec_statuses=("board", "readyToSend"))
 
     prev_status = thread["status"]
     dispatch_at = datetime.now(timezone.utc) + timedelta(seconds=UNDO_WINDOW_SECONDS)
@@ -171,15 +180,14 @@ async def dispatch_archive(thread_id: str, actor: str) -> None:
 async def archive_thread_route(
     thread_id: str,
     background_tasks: BackgroundTasks,
-    role=Depends(require_exec),
+    role=Depends(require_role),
     db=Depends(get_db),
 ):
-    _role, actor = role
+    role_value, actor = role
     thread = await db.threads.find_one({"_id": thread_id})
     if not thread:
         raise HTTPException(status_code=404, detail="Thread not found")
-    if thread["status"] != "board":
-        raise HTTPException(status_code=409, detail="Thread is not in an archivable status")
+    _check_actionable(role_value, thread["status"], exec_statuses=("board",))
 
     prev_status = thread["status"]
     dispatch_at = datetime.now(timezone.utc) + timedelta(seconds=UNDO_WINDOW_SECONDS)
@@ -199,13 +207,12 @@ async def archive_thread_route(
 
 
 @router.post("/{thread_id}/skip")
-async def skip_thread(thread_id: str, role=Depends(require_exec), db=Depends(get_db)):
-    _role, actor = role
+async def skip_thread(thread_id: str, role=Depends(require_role), db=Depends(get_db)):
+    role_value, actor = role
     thread = await db.threads.find_one({"_id": thread_id})
     if not thread:
         raise HTTPException(status_code=404, detail="Thread not found")
-    if thread["status"] != "board":
-        raise HTTPException(status_code=409, detail="Thread is not in a skippable status")
+    _check_actionable(role_value, thread["status"], exec_statuses=("board",))
 
     await db.threads.update_one({"_id": thread_id}, {"$set": {"status": "skipped"}})
     await write_audit_entry(
@@ -289,5 +296,57 @@ async def revert_thread(thread_id: str, role=Depends(require_role), db=Depends(g
         {"_id": thread_id},
         {"$set": {"draft": prior_draft, "version_stack": remaining_stack}},
         return_document=True,
+    )
+    return _thread_response(doc)
+
+
+@router.post("/{thread_id}/handoff")
+async def handoff_thread(thread_id: str, body: HandoffBody, role=Depends(require_exec), db=Depends(get_db)):
+    _role, actor = role
+    thread = await db.threads.find_one({"_id": thread_id})
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    if thread["status"] != "board":
+        raise HTTPException(status_code=409, detail="Thread is not in a handoff-able status")
+
+    ea_note = body.note.strip() or "Handed off from the board."
+    doc = await db.threads.find_one_and_update(
+        {"_id": thread_id},
+        {"$set": {"status": "withEA", "ea_note": ea_note, "draft_at_handoff": thread["draft"]}},
+        return_document=True,
+    )
+    await write_audit_entry(
+        db,
+        thread_id=thread_id,
+        actor=actor,
+        action="handoff",
+        account_email=thread["account_email"],
+        detail=ea_note,
+    )
+    return _thread_response(doc)
+
+
+@router.post("/{thread_id}/mark-ready")
+async def mark_ready_thread(thread_id: str, role=Depends(require_ea), db=Depends(get_db)):
+    _role, actor = role
+    thread = await db.threads.find_one({"_id": thread_id})
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    if thread["status"] != "withEA":
+        raise HTTPException(status_code=409, detail="Thread is not in a mark-ready-able status")
+
+    summary = await handoff_service.summarize_change(thread.get("draft_at_handoff", ""), thread["draft"])
+
+    doc = await db.threads.find_one_and_update(
+        {"_id": thread_id},
+        {"$set": {"status": "readyToSend", "draft_author": "ea", "ea_change_summary": summary}},
+        return_document=True,
+    )
+    await write_audit_entry(
+        db,
+        thread_id=thread_id,
+        actor=actor,
+        action="mark_ready",
+        account_email=thread["account_email"],
     )
     return _thread_response(doc)

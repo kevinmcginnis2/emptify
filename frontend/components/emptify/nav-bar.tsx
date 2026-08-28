@@ -76,7 +76,17 @@ export function NavBar({ role, screen, withEACount, readyCount, onSetRole, onGo 
         <div className="flex items-center gap-[var(--space-4)] ml-auto">
           {isExec && (
             <>
-              <span className="tag tag-neutral">With EA ({withEACount})</span>
+              <a
+                href="#"
+                aria-current={screen === "queue" ? "page" : undefined}
+                className="inline-flex"
+                onClick={(e) => {
+                  e.preventDefault();
+                  onGo("queue");
+                }}
+              >
+                <span className="tag tag-neutral">With EA ({withEACount})</span>
+              </a>
               <a
                 href="#"
                 aria-current={screen === "ready" ? "page" : undefined}
@@ -90,7 +100,22 @@ export function NavBar({ role, screen, withEACount, readyCount, onSetRole, onGo 
               </a>
             </>
           )}
-          {isEA && <span className="tag tag-neutral">In queue ({withEACount})</span>}
+          {isEA && (
+            <>
+              <span className="tag tag-neutral">In queue ({withEACount})</span>
+              <a
+                href="#"
+                aria-current={screen === "ready" ? "page" : undefined}
+                className="inline-flex"
+                onClick={(e) => {
+                  e.preventDefault();
+                  onGo("ready");
+                }}
+              >
+                <span className="tag tag-accent">Ready to send ({readyCount})</span>
+              </a>
+            </>
+          )}
 
           <div className="seg">
             <label className="seg-opt" data-active={isExec}>

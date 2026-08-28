@@ -37,8 +37,12 @@ export function DetailScreen({
   const busyTone = toneBusy ? toneLoading.tone : null;
   const canRevert = email.versionStack.length > 0;
 
-  const showSend = role === "exec" && (email.status === "board" || email.status === "readyToSend");
-  const showHandoffArchiveSkip = role === "exec" && email.status === "board";
+  const showSend =
+    (role === "exec" && (email.status === "board" || email.status === "readyToSend")) ||
+    (role === "ea" && email.status === "withEA");
+  const showHandoff = role === "exec" && email.status === "board";
+  const showArchiveSkip =
+    (role === "exec" && email.status === "board") || (role === "ea" && email.status === "withEA");
   const showMarkReady = role === "ea" && email.status === "withEA";
 
   return (
@@ -110,11 +114,13 @@ export function DetailScreen({
                 Send
               </button>
             )}
-            {showHandoffArchiveSkip && (
+            {showHandoff && (
+              <button type="button" className="btn-emptify btn-emptify-secondary" onClick={onHandoffClick}>
+                Hand to EA
+              </button>
+            )}
+            {showArchiveSkip && (
               <>
-                <button type="button" className="btn-emptify btn-emptify-secondary" onClick={onHandoffClick}>
-                  Hand to EA
-                </button>
                 <button type="button" className="btn-emptify btn-emptify-secondary" onClick={onArchive}>
                   Archive
                 </button>

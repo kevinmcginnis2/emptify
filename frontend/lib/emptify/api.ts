@@ -132,3 +132,18 @@ export async function undoThread(id: string, role: Role): Promise<{ status: stri
     headers: roleHeaders(role),
   });
 }
+
+export async function postHandoff(id: string, note: string, role: Role): Promise<EmailThread> {
+  return request<EmailThread>(`/api/v1/threads/${id}/handoff`, {
+    method: "POST",
+    headers: roleHeaders(role),
+    body: JSON.stringify({ note }),
+  });
+}
+
+export async function postMarkReady(id: string, role: Role): Promise<EmailThread> {
+  return request<EmailThread>(`/api/v1/threads/${id}/mark-ready`, {
+    method: "POST",
+    headers: roleHeaders(role),
+  });
+}
