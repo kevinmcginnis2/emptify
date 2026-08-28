@@ -344,7 +344,12 @@ async def sync_account_board(account: dict) -> None:
             elif "INBOX" in (msg.get("labelIds") or []):
                 new_thread_ids.add(thread_id)
         for deleted in record.get("messagesDeleted", []):
-            thread_id = deleted.get("message", {}).get("threadId")
+            deleted_msg = deleted.get("message", {})
+            if "DRAFT" in (deleted_msg.get("labelIds") or []):
+                # Gmail's own compose-then-send cleanup (a Draft object created and
+                # deleted as part of sending), not a real message deletion.
+                continue
+            thread_id = deleted_msg.get("threadId")
             if thread_id:
                 deleted_thread_ids.add(thread_id)
         for label_change in record.get("labelsAdded", []):
