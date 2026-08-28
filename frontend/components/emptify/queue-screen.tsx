@@ -2,7 +2,6 @@
 
 import { BlueprintCorners } from "./blueprint-corners";
 import { EmailThread } from "@/lib/emptify/types";
-import { ACCOUNT_LABELS } from "@/lib/emptify/data";
 
 interface QueueScreenProps {
   emails: EmailThread[];
@@ -31,7 +30,7 @@ export function QueueScreen({ emails, onOpen }: QueueScreenProps) {
               <BlueprintCorners />
               <div className="flex justify-between gap-[var(--space-3)]">
                 <div className="card-title">{em.subject}</div>
-                <span className="tag tag-neutral">{ACCOUNT_LABELS[em.account]}</span>
+                <span className="tag tag-neutral">{em.accountLabel}</span>
               </div>
               <div className="card-body">From {em.from}</div>
               <div className="text-[13px] bg-[var(--color-surface)] p-[var(--space-2)]">

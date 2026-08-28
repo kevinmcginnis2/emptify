@@ -171,3 +171,41 @@ def _get_message_full_sync(creds: Credentials, message_id: str) -> dict:
 
 async def get_message_full(creds: Credentials, message_id: str) -> dict:
     return await asyncio.to_thread(_get_message_full_sync, creds, message_id)
+
+
+def _list_inbox_sync(creds: Credentials, since_date: str, max_results: int) -> tuple[list[str], bool]:
+    service = build("gmail", "v1", credentials=creds)
+    query = f"in:inbox after:{since_date}"
+    message_ids: list[str] = []
+    page_token = None
+    while len(message_ids) < max_results:
+        resp = (
+            service.users()
+            .messages()
+            .list(
+                userId="me",
+                q=query,
+                maxResults=min(100, max_results - len(message_ids)),
+                pageToken=page_token,
+            )
+            .execute()
+        )
+        message_ids.extend(m["id"] for m in resp.get("messages", []))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    hit_cap = len(message_ids) >= max_results
+    return message_ids[:max_results], hit_cap
+
+
+async def list_inbox_since(creds: Credentials, since_date: str, max_results: int) -> tuple[list[str], bool]:
+    return await asyncio.to_thread(_list_inbox_sync, creds, since_date, max_results)
+
+
+def _get_thread_full_sync(creds: Credentials, gmail_thread_id: str) -> dict:
+    service = build("gmail", "v1", credentials=creds)
+    return service.users().threads().get(userId="me", id=gmail_thread_id, format="full").execute()
+
+
+async def get_thread_full(creds: Credentials, gmail_thread_id: str) -> dict:
+    return await asyncio.to_thread(_get_thread_full_sync, creds, gmail_thread_id)

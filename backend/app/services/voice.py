@@ -65,7 +65,7 @@ def _find_part(payload: dict, mime_type: str) -> dict | None:
     return None
 
 
-def _extract_body_text(payload: dict) -> str:
+def extract_body_text(payload: dict) -> str:
     plain = _find_part(payload, "text/plain")
     if plain:
         return _decode_body_data(plain["body"]["data"])
@@ -85,7 +85,7 @@ def _extract_new_content(body_text: str) -> str:
     return "\n".join(new_lines).strip()
 
 
-def _classify_domain(to_header: str, internal_domains: str) -> str:
+def classify_domain(to_header: str, internal_domains: str) -> str:
     if not to_header:
         return "client"
     first_recipient = to_header.split(",")[0]
@@ -124,11 +124,11 @@ async def collect_samples(mode: str) -> tuple[list[str], int, int]:
             if _is_forward(subject) or _is_auto_response(headers, subject):
                 continue
 
-            new_content = _extract_new_content(_extract_body_text(payload))
+            new_content = _extract_new_content(extract_body_text(payload))
             if len(new_content.split()) < NOISE_MIN_WORDS:
                 continue
 
-            if _classify_domain(to_header, account.get("internal_domains", "")) != mode:
+            if classify_domain(to_header, account.get("internal_domains", "")) != mode:
                 continue
 
             qualifying_count += 1

@@ -2,10 +2,11 @@
 
 import { EmailCard } from "./email-card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { AccountId, EmailThread } from "@/lib/emptify/types";
-import { ACCOUNT_LABELS } from "@/lib/emptify/data";
+import { Account, AccountId, EmailThread } from "@/lib/emptify/types";
 
 interface BoardScreenProps {
+  accounts: Account[];
+  loading: boolean;
   accountFilter: AccountId | "all";
   onAccountFilterChange: (value: AccountId | "all") => void;
   todayList: EmailThread[];
@@ -14,13 +15,6 @@ interface BoardScreenProps {
   onOpen: (id: string) => void;
   onHandoff: (id: string) => void;
 }
-
-const FILTER_OPTIONS: { value: AccountId | "all"; label: string }[] = [
-  { value: "all", label: "All accounts" },
-  { value: "kestrel", label: "Kestrel Partners" },
-  { value: "northwind", label: "Northwind Health" },
-  { value: "personal", label: "Personal Gmail" },
-];
 
 function Column({
   title,
@@ -43,7 +37,7 @@ function Column({
           <EmailCard
             key={em.id}
             email={em}
-            accountLabel={ACCOUNT_LABELS[em.account]}
+            accountLabel={em.accountLabel}
             onOpen={() => onOpen(em.id)}
             onHandoffClick={(e) => {
               e.stopPropagation();
@@ -57,6 +51,8 @@ function Column({
 }
 
 export function BoardScreen({
+  accounts,
+  loading,
   accountFilter,
   onAccountFilterChange,
   todayList,
@@ -65,10 +61,18 @@ export function BoardScreen({
   onOpen,
   onHandoff,
 }: BoardScreenProps) {
+  const filterOptions: { value: AccountId | "all"; label: string }[] = [
+    { value: "all", label: "All accounts" },
+    ...accounts.map((acc) => ({ value: acc.id, label: acc.name })),
+  ];
+
   return (
     <div>
       <div className="flex items-baseline justify-between mb-[var(--space-4)] flex-wrap gap-[var(--space-3)]">
-        <h2 className="m-0">Triage board</h2>
+        <div className="flex items-baseline gap-[var(--space-3)]">
+          <h2 className="m-0">Triage board</h2>
+          {loading && <span className="text-emptify-muted text-[13px]">Syncing…</span>}
+        </div>
         <div className="w-[220px]">
           <label className="field-label">Account</label>
           <Select value={accountFilter} onValueChange={(v) => onAccountFilterChange(v as AccountId | "all")}>
@@ -76,7 +80,7 @@ export function BoardScreen({
               <SelectValue />
             </SelectTrigger>
             <SelectContent className="rounded-none">
-              {FILTER_OPTIONS.map((opt) => (
+              {filterOptions.map((opt) => (
                 <SelectItem key={opt.value} value={opt.value}>
                   {opt.label}
                 </SelectItem>

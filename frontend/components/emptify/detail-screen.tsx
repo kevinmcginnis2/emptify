@@ -2,7 +2,7 @@
 
 import { BlueprintCorners } from "./blueprint-corners";
 import { EmailThread, Role, Tone, ToneLoadingState } from "@/lib/emptify/types";
-import { ACCOUNT_LABELS, BUCKET_LABELS } from "@/lib/emptify/data";
+import { BUCKET_LABELS } from "@/lib/emptify/data";
 
 interface DetailScreenProps {
   email: EmailThread;
@@ -49,7 +49,7 @@ export function DetailScreen({
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_1.1fr] gap-[var(--space-6)] items-start">
         <div className="flex flex-col gap-[var(--space-3)]">
           <h3 className="mb-0">{email.subject}</h3>
-          <span className="tag tag-neutral self-start">{ACCOUNT_LABELS[email.account]}</span>
+          <span className="tag tag-neutral self-start">{email.accountLabel}</span>
           {email.messages.map((m, i) => (
             <div key={i} className="blueprint card-emptify elev-sm">
               <BlueprintCorners />

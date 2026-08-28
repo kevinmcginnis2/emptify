@@ -2,7 +2,6 @@
 
 import { BlueprintCorners } from "./blueprint-corners";
 import { EmailThread } from "@/lib/emptify/types";
-import { ACCOUNT_LABELS } from "@/lib/emptify/data";
 
 interface ReadyScreenProps {
   emails: EmailThread[];
@@ -29,7 +28,7 @@ export function ReadyScreen({ emails, onOpen }: ReadyScreenProps) {
             <BlueprintCorners />
             <div className="flex justify-between gap-[var(--space-3)]">
               <div className="card-title">{em.subject}</div>
-              <span className="tag tag-accent">{ACCOUNT_LABELS[em.account]}</span>
+              <span className="tag tag-accent">{em.accountLabel}</span>
             </div>
             <div className="card-body">To {em.from}</div>
             <div className="text-emptify-muted text-[12px]">Theo: {em.eaChangeSummary}</div>

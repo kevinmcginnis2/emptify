@@ -1,4 +1,6 @@
-import { Account, Role, VoiceMode, VoiceProfile, VoiceState } from "./types";
+import { Account, EmailThread, Role, VoiceMode, VoiceProfile, VoiceState } from "./types";
+
+export type ThreadListStatus = "board" | "withEA" | "readyToSend";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -72,4 +74,10 @@ export async function rebuildVoice(mode: VoiceMode, role: Role): Promise<VoicePr
     method: "POST",
     headers: roleHeaders(role),
   });
+}
+
+export async function getThreads(status: ThreadListStatus, account?: string): Promise<EmailThread[]> {
+  const params = new URLSearchParams({ status });
+  if (account) params.set("account", account);
+  return request<EmailThread[]>(`/api/v1/threads?${params.toString()}`);
 }

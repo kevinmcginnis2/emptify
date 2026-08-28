@@ -7,10 +7,57 @@ from app.api.v1.deps import require_exec, require_role
 from app.db import get_db
 from app.services import gmail
 from app.services.audit import write_audit_entry
+from app.services.triage import sync_board
 
 router = APIRouter(prefix="/threads", tags=["threads"])
 
 SEND_UNDO_WINDOW_SECONDS = 12
+VALID_STATUSES = ("board", "withEA", "readyToSend")
+
+
+def _thread_response(doc: dict) -> dict:
+    return {
+        "id": doc["_id"],
+        "account": doc["account_id"],
+        "accountLabel": doc["account_label"],
+        "accountEmail": doc["account_email"],
+        "from": doc["from_name"],
+        "fromEmail": doc["from_email"],
+        "subject": doc["subject"],
+        "bucket": doc["bucket"],
+        "reason": doc["reason"],
+        "voiceMode": doc["voice_mode"],
+        "voiceWhy": doc["voice_why"],
+        "messages": doc.get("messages", []),
+        "draft": doc.get("draft", ""),
+        "draftAuthor": doc.get("draft_author", "emptify"),
+        "versionStack": doc.get("version_stack", []),
+        "handoffSuggested": doc.get("handoff_suggested", False),
+        "handoffReason": doc.get("handoff_reason", ""),
+        "status": doc["status"],
+        "prevStatus": doc.get("prev_status"),
+        "eaNote": doc.get("ea_note", ""),
+        "eaChangeSummary": doc.get("ea_change_summary", ""),
+        "draftAtHandoff": doc.get("draft_at_handoff", ""),
+    }
+
+
+@router.get("")
+async def list_threads(status: str, account: str | None = None, db=Depends(get_db)):
+    if status not in VALID_STATUSES:
+        raise HTTPException(status_code=400, detail="status must be 'board', 'withEA', or 'readyToSend'")
+
+    if status == "board":
+        await sync_board()
+
+    query: dict = {"status": status}
+    if account:
+        query["account_id"] = account
+
+    threads = []
+    async for doc in db.threads.find(query):
+        threads.append(_thread_response(doc))
+    return threads
 
 
 async def dispatch_send(thread_id: str, actor: str) -> None:

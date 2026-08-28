@@ -12,7 +12,7 @@ import { HandoffDialog } from "./handoff-dialog";
 import { ConfirmSendDialog } from "./confirm-send-dialog";
 import { EmptifyToast } from "./toast";
 import * as api from "@/lib/emptify/api";
-import { initialEmails, toneData } from "@/lib/emptify/data";
+import { toneData } from "@/lib/emptify/data";
 import {
   Account,
   AccountId,
@@ -47,7 +47,8 @@ export function EmptifyApp() {
 
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [connecting, setConnecting] = useState(false);
-  const [emails, setEmails] = useState(initialEmails);
+  const [emails, setEmails] = useState<EmailThread[]>([]);
+  const [boardLoading, setBoardLoading] = useState(false);
   const [voice, setVoice] = useState<VoiceState>(EMPTY_VOICE_STATE);
 
   const [toast, setToast] = useState<ToastState | null>(null);
@@ -75,22 +76,48 @@ export function EmptifyApp() {
     api.getAccounts().then(setAccounts).catch(() => {});
     api.getVoice().then(setVoice).catch(() => {});
 
-    const requested = new URLSearchParams(window.location.search).get("screen");
-    if (requested && RESTORABLE_SCREENS.includes(requested as Screen)) {
-      setScreen(requested as Screen);
+    const params = new URLSearchParams(window.location.search);
+    const requestedScreen = params.get("screen");
+    if (requestedScreen && RESTORABLE_SCREENS.includes(requestedScreen as Screen)) {
+      setScreen(requestedScreen as Screen);
+    }
+    const requestedAccount = params.get("account");
+    if (requestedAccount) {
+      setAccountFilter(requestedAccount);
     }
   }, []);
 
-  // Keeps the current screen in the URL (except "detail", which has no stable
-  // reference until threads come from the backend) so a refresh — including
-  // the one after the OAuth connect/reconnect redirect — lands back where the
-  // user was instead of resetting to the board.
+  // Keeps the current screen (and, on the board, the account filter) in the
+  // URL — except "detail", which has no stable reference until threads come
+  // from the backend — so a refresh, including the one after the OAuth
+  // connect/reconnect redirect, lands back where the user was instead of
+  // resetting to the board with no filter.
   useEffect(() => {
     if (screen === "detail") return;
-    const url =
-      screen === "board" ? window.location.pathname : `${window.location.pathname}?screen=${screen}`;
-    window.history.replaceState(null, "", url);
-  }, [screen]);
+    const params = new URLSearchParams();
+    if (screen !== "board") params.set("screen", screen);
+    if (screen === "board" && accountFilter !== "all") params.set("account", accountFilter);
+    const query = params.toString();
+    window.history.replaceState(null, "", query ? `${window.location.pathname}?${query}` : window.location.pathname);
+  }, [screen, accountFilter]);
+
+  // The board endpoint runs a real (incremental) Gmail sync server-side on
+  // every call, so re-fetching whenever the board is visited — not just on
+  // first mount — is what actually picks up newly-arrived mail. A sync with
+  // a backlog of new mail can take a while (one real Gmail fetch + one real
+  // Claude call per new message, processed one at a time), so boardLoading
+  // gives the screen something to show instead of looking stuck.
+  useEffect(() => {
+    if (screen !== "board") return;
+    setBoardLoading(true);
+    api
+      .getThreads("board", accountFilter === "all" ? undefined : accountFilter)
+      .then((boardEmails) => {
+        setEmails((prev) => [...prev.filter((e) => e.status !== "board"), ...boardEmails]);
+      })
+      .catch(() => {})
+      .finally(() => setBoardLoading(false));
+  }, [screen, accountFilter]);
 
   const getEmail = useCallback((id: string) => emails.find((e) => e.id === id), [emails]);
 
@@ -386,6 +413,8 @@ export function EmptifyApp() {
 
         {screen === "board" && (
           <BoardScreen
+            accounts={accounts}
+            loading={boardLoading}
             accountFilter={accountFilter}
             onAccountFilterChange={setAccountFilter}
             todayList={todayList}
