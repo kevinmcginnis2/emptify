@@ -1,10 +1,10 @@
-# Emptify Build — Session Recap (through S5)
+# Emptify Build — Session Recap (through S6)
 
 This is a handoff doc for continuing this build in a fresh conversation without re-reading the whole prior thread. Point a new session at this repo and have it read this file plus `Backend-dev-plan.md` (which now includes an `S9` section) before continuing.
 
 ## Where things stand
 
-Branch `main`, all work pushed. Sprints **S0–S5 are complete**, each committed and pushed individually:
+Branch `main`, all work pushed. Sprints **S0–S6 are complete**, each committed and pushed individually:
 
 ```
 17afbae Add Emptify frontend scaffold
@@ -14,9 +14,10 @@ Branch `main`, all work pushed. Sprints **S0–S5 are complete**, each committed
 8cedb91 Add S3: multi-account Connect screen and fix two live bugs
 adee772 Add S4: voice profile builder from real 90-day sent mail
 8ef5a8e Add S5: unified triage engine and real Board, fix account-label/filter bugs
+9f5e9ad Add S6: voice-matched draft generation and real tone rewrite/revert
 ```
 
-**Next up: S6 (Draft Generation & Tone Controls)**, then S7 (Send/Archive/Skip), then S8 (Handoff Loop & EA Queue) — all as originally scoped in `Backend-dev-plan.md`. A new `S9` section was added for post-MVP follow-ups (see below).
+**Next up: S7 (Send/Archive/Skip)**, then S8 (Handoff Loop & EA Queue) — as originally scoped in `Backend-dev-plan.md`. Note: S2 proved the real Gmail send/undo pipeline via curl, but the frontend's Send/Archive/Skip/Handoff/Mark-ready buttons are still client-state-only stubs (`confirmSendNow`, `archiveEmail`, `skipEmail`, `submitHandoff`, `markReady` in `emptify-app.tsx`) — wiring those to the real backend endpoints (`send`, `undo`, and the not-yet-built `archive`/`skip`/`handoff`/`mark-ready`) is what S7/S8 actually do. A new `S9` section was added for post-MVP follow-ups (see below).
 
 ## Real integrations — all live and working
 
@@ -33,6 +34,7 @@ adee772 Add S4: voice profile builder from real 90-day sent mail
 - **S3** — Frontend's first real backend wiring: Connect screen, `frontend/lib/emptify/api.ts` (the fetch wrapper + `X-Role` attachment), all 3 accounts connecting/reconnecting through the real UI, debounced internal-domains PATCH.
 - **S4** — Voice profile builder (`backend/app/services/voice.py`): pulls 90 days of Sent mail per account, noise-filters (forwards/auto-responses/short replies), splits by recipient domain into pooled client/internal profiles, extracts 6 traits + a default note via one forced-tool-use Anthropic call per mode. Rebuilding a profile only sets the default note the *first* time — later rebuilds never overwrite notes the user edited (explicit product decision, see S4 section in the dev plan).
 - **S5** — Real inbound triage (`backend/app/services/triage.py`): incremental Gmail Inbox sync (capped at 20 new messages/account/call, dedup by Gmail `threadId`, `last_sync` only advances when the whole backlog was processed), one Anthropic call per new thread for bucket/reason/handoff, deterministic domain-matching (reused from S4) for voice_mode/voice_why. Board screen wired to real data for the first time.
+- **S6** — Draft generation and tone controls. The triage Anthropic call (`triage.py`) now also emits a voice-matched `draft` in the same request (voice_mode is computed deterministically *before* the LLM call now, so its traits/notes can be folded into the same prompt — avoids a second sequential LLM call per synced message, which would have compounded the S9-flagged sync-latency concern). New `backend/app/services/tone.py` does the Shorter/Warmer/Firmer rewrite (forced tool-use, same pattern as `voice.py`/`triage.py`) — its prompt explicitly demands a rewrite "genuinely, noticeably different" from the input, because the model would otherwise sometimes return an already-warm draft unchanged on `warmer`. Three new routes on `threads.py`: `PATCH .../draft`, `POST .../tone` (409 if thread isn't `board`/`withEA`/`readyToSend`), `POST .../revert` (409 on an empty `version_stack`). Frontend's draft textarea/tone buttons/revert arrow — built ahead of the backend with a `setTimeout` + static `TONE_DATA` dummy map keyed by non-real seed IDs — are now wired to real calls; `TONE_DATA`/`toneData()`/`ToneData` deleted as dead code.
 
 ## Bugs found and fixed along the way
 
