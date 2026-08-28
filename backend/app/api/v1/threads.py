@@ -5,7 +5,7 @@ from typing import Literal
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.api.v1.deps import require_ea, require_exec, require_role
+from app.api.v1.deps import get_current_user, resolve_thread_actor
 from app.db import get_db
 from app.services import gmail, handoff as handoff_service, tone as tone_service, unsubscribe as unsubscribe_service
 from app.services.audit import write_audit_entry
@@ -40,6 +40,25 @@ def _check_actionable(role: str, status: str, exec_statuses: tuple[str, ...]) ->
         raise HTTPException(status_code=409, detail="Thread is not in an actionable status")
 
 
+async def _get_thread_or_404(db, thread_id: str) -> dict:
+    thread = await db.threads.find_one({"_id": thread_id})
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    return thread
+
+
+async def _load_actionable_thread(
+    thread_id: str, user: dict, db, exec_statuses: tuple[str, ...]
+) -> tuple[dict, str, str]:
+    """Fetch the thread, derive (role, actor_name) from real ownership/grant (never
+    a client-asserted header), and enforce the same status-gating rules that have
+    always governed these actions. Raises 404/403/409 as appropriate."""
+    thread = await _get_thread_or_404(db, thread_id)
+    role_value, actor = await resolve_thread_actor(thread, user, db)
+    _check_actionable(role_value, thread["status"], exec_statuses)
+    return thread, role_value, actor
+
+
 def _thread_response(doc: dict) -> dict:
     return {
         "id": doc["_id"],
@@ -72,14 +91,35 @@ def _thread_response(doc: dict) -> dict:
 
 
 @router.get("")
-async def list_threads(status: str, account: str | None = None, db=Depends(get_db)):
+async def list_threads(
+    status: str,
+    account: str | None = None,
+    as_ea: bool = False,
+    user=Depends(get_current_user),
+    db=Depends(get_db),
+):
     if status not in VALID_STATUSES:
         raise HTTPException(status_code=400, detail="status must be 'board', 'withEA', or 'readyToSend'")
 
     if status == "board":
-        await sync_board()
+        await sync_board(user["_id"])
+        owner_id = user["_id"]
+    elif as_ea:
+        # The queue this caller is handling on behalf of an exec who granted them
+        # access — distinct from an exec's own "with my EA" view below. This
+        # sprint's EA view is deliberately 1:1 — whichever single exec has granted
+        # access, no multi-exec switcher.
+        relationship = await db.exec_ea_relationships.find_one({"ea_user_id": user["_id"]})
+        if not relationship:
+            return []
+        owner_id = relationship["exec_user_id"]
+    else:
+        # An exec's own withEA/readyToSend threads — the ones they've handed off,
+        # scoped to their own account regardless of whether they're also someone
+        # else's granted EA.
+        owner_id = user["_id"]
 
-    query: dict = {"status": status}
+    query: dict = {"status": status, "user_id": owner_id}
     if account:
         query["account_id"] = account
 
@@ -146,14 +186,12 @@ async def send_thread(
     thread_id: str,
     body: SendBody,
     background_tasks: BackgroundTasks,
-    role=Depends(require_role),
+    user=Depends(get_current_user),
     db=Depends(get_db),
 ):
-    role_value, actor = role
-    thread = await db.threads.find_one({"_id": thread_id})
-    if not thread:
-        raise HTTPException(status_code=404, detail="Thread not found")
-    _check_actionable(role_value, thread["status"], exec_statuses=("board", "readyToSend"))
+    thread, _role, actor = await _load_actionable_thread(
+        thread_id, user, db, exec_statuses=("board", "readyToSend")
+    )
 
     prev_status = thread["status"]
     dispatch_at = datetime.now(timezone.utc) + timedelta(seconds=UNDO_WINDOW_SECONDS)
@@ -204,14 +242,10 @@ async def dispatch_archive(thread_id: str, actor: str) -> None:
 async def archive_thread_route(
     thread_id: str,
     background_tasks: BackgroundTasks,
-    role=Depends(require_role),
+    user=Depends(get_current_user),
     db=Depends(get_db),
 ):
-    role_value, actor = role
-    thread = await db.threads.find_one({"_id": thread_id})
-    if not thread:
-        raise HTTPException(status_code=404, detail="Thread not found")
-    _check_actionable(role_value, thread["status"], exec_statuses=("board",))
+    thread, _role, actor = await _load_actionable_thread(thread_id, user, db, exec_statuses=("board",))
 
     prev_status = thread["status"]
     dispatch_at = datetime.now(timezone.utc) + timedelta(seconds=UNDO_WINDOW_SECONDS)
@@ -231,12 +265,8 @@ async def archive_thread_route(
 
 
 @router.post("/{thread_id}/skip")
-async def skip_thread(thread_id: str, role=Depends(require_role), db=Depends(get_db)):
-    role_value, actor = role
-    thread = await db.threads.find_one({"_id": thread_id})
-    if not thread:
-        raise HTTPException(status_code=404, detail="Thread not found")
-    _check_actionable(role_value, thread["status"], exec_statuses=("board",))
+async def skip_thread(thread_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    thread, _role, actor = await _load_actionable_thread(thread_id, user, db, exec_statuses=("board",))
 
     await db.threads.update_one({"_id": thread_id}, {"$set": {"status": "skipped"}})
     await write_audit_entry(
@@ -250,12 +280,8 @@ async def skip_thread(thread_id: str, role=Depends(require_role), db=Depends(get
 
 
 @router.post("/{thread_id}/mark-read")
-async def mark_read_thread(thread_id: str, role=Depends(require_role), db=Depends(get_db)):
-    role_value, actor = role
-    thread = await db.threads.find_one({"_id": thread_id})
-    if not thread:
-        raise HTTPException(status_code=404, detail="Thread not found")
-    _check_actionable(role_value, thread["status"], exec_statuses=("board",))
+async def mark_read_thread(thread_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    thread, _role, actor = await _load_actionable_thread(thread_id, user, db, exec_statuses=("board",))
 
     doc = await db.threads.find_one_and_update(
         {"_id": thread_id}, {"$set": {"read": True}}, return_document=True
@@ -271,12 +297,8 @@ async def mark_read_thread(thread_id: str, role=Depends(require_role), db=Depend
 
 
 @router.post("/{thread_id}/remove")
-async def remove_thread(thread_id: str, role=Depends(require_role), db=Depends(get_db)):
-    role_value, actor = role
-    thread = await db.threads.find_one({"_id": thread_id})
-    if not thread:
-        raise HTTPException(status_code=404, detail="Thread not found")
-    _check_actionable(role_value, thread["status"], exec_statuses=("board",))
+async def remove_thread(thread_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    thread, _role, actor = await _load_actionable_thread(thread_id, user, db, exec_statuses=("board",))
 
     await db.threads.update_one({"_id": thread_id}, {"$set": {"status": "removed"}})
     await write_audit_entry(
@@ -320,14 +342,10 @@ async def dispatch_delete(thread_id: str, actor: str) -> None:
 async def delete_thread_route(
     thread_id: str,
     background_tasks: BackgroundTasks,
-    role=Depends(require_role),
+    user=Depends(get_current_user),
     db=Depends(get_db),
 ):
-    role_value, actor = role
-    thread = await db.threads.find_one({"_id": thread_id})
-    if not thread:
-        raise HTTPException(status_code=404, detail="Thread not found")
-    _check_actionable(role_value, thread["status"], exec_statuses=("board",))
+    thread, _role, actor = await _load_actionable_thread(thread_id, user, db, exec_statuses=("board",))
 
     prev_status = thread["status"]
     dispatch_at = datetime.now(timezone.utc) + timedelta(seconds=UNDO_WINDOW_SECONDS)
@@ -347,12 +365,8 @@ async def delete_thread_route(
 
 
 @router.post("/{thread_id}/unsubscribe")
-async def unsubscribe_thread(thread_id: str, role=Depends(require_role), db=Depends(get_db)):
-    role_value, actor = role
-    thread = await db.threads.find_one({"_id": thread_id})
-    if not thread:
-        raise HTTPException(status_code=404, detail="Thread not found")
-    _check_actionable(role_value, thread["status"], exec_statuses=("board",))
+async def unsubscribe_thread(thread_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    thread, _role, actor = await _load_actionable_thread(thread_id, user, db, exec_statuses=("board",))
 
     urls = unsubscribe_service.parse_list_unsubscribe(thread.get("list_unsubscribe", ""))
     https_url = next((u for u in urls if u.lower().startswith("https://")), None)
@@ -405,9 +419,10 @@ async def unsubscribe_thread(thread_id: str, role=Depends(require_role), db=Depe
 
 
 @router.post("/{thread_id}/undo")
-async def undo_thread(thread_id: str, role=Depends(require_role), db=Depends(get_db)):
-    thread = await db.threads.find_one({"_id": thread_id})
-    if not thread or not thread.get("pending_action"):
+async def undo_thread(thread_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    thread = await _get_thread_or_404(db, thread_id)
+    await resolve_thread_actor(thread, user, db)  # 403 if not authorized for this thread
+    if not thread.get("pending_action"):
         raise HTTPException(status_code=409, detail="No pending action to undo")
 
     prev_status = thread.get("prev_status", "board")
@@ -427,26 +442,31 @@ async def undo_thread(thread_id: str, role=Depends(require_role), db=Depends(get
 
 
 @router.patch("/{thread_id}/draft")
-async def patch_draft(thread_id: str, body: PatchDraftBody, role=Depends(require_role), db=Depends(get_db)):
+async def patch_draft(
+    thread_id: str, body: PatchDraftBody, user=Depends(get_current_user), db=Depends(get_db)
+):
+    thread = await _get_thread_or_404(db, thread_id)
+    await resolve_thread_actor(thread, user, db)  # 403 if not authorized for this thread
     doc = await db.threads.find_one_and_update(
         {"_id": thread_id},
         {"$set": {"draft": body.draft}},
         return_document=True,
     )
-    if not doc:
-        raise HTTPException(status_code=404, detail="Thread not found")
     return _thread_response(doc)
 
 
 @router.post("/{thread_id}/tone")
-async def tone_thread(thread_id: str, body: ToneBody, role=Depends(require_role), db=Depends(get_db)):
-    thread = await db.threads.find_one({"_id": thread_id})
-    if not thread:
-        raise HTTPException(status_code=404, detail="Thread not found")
+async def tone_thread(
+    thread_id: str, body: ToneBody, user=Depends(get_current_user), db=Depends(get_db)
+):
+    thread = await _get_thread_or_404(db, thread_id)
+    await resolve_thread_actor(thread, user, db)  # 403 if not authorized for this thread
     if thread["status"] not in EDITABLE_STATUSES:
         raise HTTPException(status_code=409, detail="Thread is not in an editable status")
 
-    voice_profile = await db.voice_profiles.find_one({"_id": thread["voice_mode"]})
+    voice_profile = await db.voice_profiles.find_one(
+        {"exec_user_id": thread["user_id"], "mode": thread["voice_mode"]}
+    )
     voice_traits = (voice_profile or {}).get("traits", [])
     voice_notes = (voice_profile or {}).get("notes", "")
 
@@ -464,10 +484,9 @@ async def tone_thread(thread_id: str, body: ToneBody, role=Depends(require_role)
 
 
 @router.post("/{thread_id}/revert")
-async def revert_thread(thread_id: str, role=Depends(require_role), db=Depends(get_db)):
-    thread = await db.threads.find_one({"_id": thread_id})
-    if not thread:
-        raise HTTPException(status_code=404, detail="Thread not found")
+async def revert_thread(thread_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    thread = await _get_thread_or_404(db, thread_id)
+    await resolve_thread_actor(thread, user, db)  # 403 if not authorized for this thread
 
     version_stack = thread.get("version_stack", [])
     if not version_stack:
@@ -485,11 +504,13 @@ async def revert_thread(thread_id: str, role=Depends(require_role), db=Depends(g
 
 
 @router.post("/{thread_id}/handoff")
-async def handoff_thread(thread_id: str, body: HandoffBody, role=Depends(require_exec), db=Depends(get_db)):
-    _role, actor = role
-    thread = await db.threads.find_one({"_id": thread_id})
-    if not thread:
-        raise HTTPException(status_code=404, detail="Thread not found")
+async def handoff_thread(
+    thread_id: str, body: HandoffBody, user=Depends(get_current_user), db=Depends(get_db)
+):
+    thread = await _get_thread_or_404(db, thread_id)
+    role_value, actor = await resolve_thread_actor(thread, user, db)
+    if role_value != "exec":
+        raise HTTPException(status_code=403, detail="This action requires being the owning exec")
     if thread["status"] != "board":
         raise HTTPException(status_code=409, detail="Thread is not in a handoff-able status")
 
@@ -511,11 +532,11 @@ async def handoff_thread(thread_id: str, body: HandoffBody, role=Depends(require
 
 
 @router.post("/{thread_id}/mark-ready")
-async def mark_ready_thread(thread_id: str, role=Depends(require_ea), db=Depends(get_db)):
-    _role, actor = role
-    thread = await db.threads.find_one({"_id": thread_id})
-    if not thread:
-        raise HTTPException(status_code=404, detail="Thread not found")
+async def mark_ready_thread(thread_id: str, user=Depends(get_current_user), db=Depends(get_db)):
+    thread = await _get_thread_or_404(db, thread_id)
+    role_value, actor = await resolve_thread_actor(thread, user, db)
+    if role_value != "ea":
+        raise HTTPException(status_code=403, detail="This action requires being the granted EA")
     if thread["status"] != "withEA":
         raise HTTPException(status_code=409, detail="Thread is not in a mark-ready-able status")
 

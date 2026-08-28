@@ -3,7 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-Actor = Literal["Mara Lindqvist", "Theo Banks", "Emptify Sync"]
+Actor = str  # real per-tenant user names, or "Emptify Sync" for system-attributed actions
 Action = Literal[
     "handoff",
     "edit",

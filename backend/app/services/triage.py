@@ -269,7 +269,9 @@ async def _ingest_new_thread(db, account: dict, creds, gmail_thread_id: str) -> 
 
     fields, from_name, latest_body = _classification_fields(full_thread, messages, account)
 
-    voice_profile = await db.voice_profiles.find_one({"_id": fields["voice_mode"]})
+    voice_profile = await db.voice_profiles.find_one(
+        {"exec_user_id": account["user_id"], "mode": fields["voice_mode"]}
+    )
     voice_traits = (voice_profile or {}).get("traits", [])
     voice_notes = (voice_profile or {}).get("notes", "")
 
@@ -279,6 +281,7 @@ async def _ingest_new_thread(db, account: dict, creds, gmail_thread_id: str) -> 
 
     doc = {
         "_id": gmail_thread_id,
+        "user_id": account["user_id"],
         "account_id": account["_id"],
         "account_label": account["name"],
         "account_email": account["email"],
@@ -322,7 +325,9 @@ async def _resync_existing_thread(db, account: dict, creds, thread_id: str) -> N
 
     fields, from_name, latest_body = _classification_fields(full_thread, messages, account)
 
-    voice_profile = await db.voice_profiles.find_one({"_id": fields["voice_mode"]})
+    voice_profile = await db.voice_profiles.find_one(
+        {"exec_user_id": account["user_id"], "mode": fields["voice_mode"]}
+    )
     voice_traits = (voice_profile or {}).get("traits", [])
     voice_notes = (voice_profile or {}).get("notes", "")
 
@@ -481,9 +486,9 @@ async def sync_account_board(account: dict) -> None:
     await db.accounts.update_one({"_id": account["_id"]}, {"$set": {"history_id": new_history_id}})
 
 
-async def sync_board() -> None:
+async def sync_board(user_id) -> None:
     db = get_db()
-    async for account in db.accounts.find({"status": "connected"}):
+    async for account in db.accounts.find({"status": "connected", "user_id": user_id}):
         try:
             await sync_account_board(account)
         except Exception:

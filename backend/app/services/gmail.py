@@ -1,9 +1,11 @@
 import asyncio
 import base64
-from datetime import datetime, timezone
+import secrets
+from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 
 from google.auth.transport.requests import Request
+from google.oauth2 import id_token as google_id_token
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
@@ -12,10 +14,15 @@ from googleapiclient.errors import HttpError
 from app.config import settings
 
 SCOPES = [
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/gmail.modify",
 ]
+
+OAUTH_STATE_TTL_SECONDS = 600
 
 
 def _client_config() -> dict:
@@ -36,34 +43,57 @@ def _build_flow() -> Flow:
     return flow
 
 
-# PKCE code_verifier is generated per-Flow-instance by authorization_url() but
-# is needed again on the separate callback request's Flow instance to exchange
-# the code, so it's stashed here keyed by the OAuth `state` in between.
-_pending_verifiers: dict[str, str] = {}
-
-
-def _authorization_url_sync() -> str:
-    flow = _build_flow()
+# PKCE code_verifier is generated per-Flow-instance by authorization_url() but is
+# needed again on the separate callback request's Flow instance to exchange the
+# code. Stashed server-side in Mongo (backend/app/api/v1/db.oauth_states) keyed by
+# the OAuth `state`, rather than an in-process dict — the previous in-process
+# approach didn't survive multiple Render workers or a restart between authorize
+# and callback, and `state` becomes a genuine single-use, TTL'd token this way
+# (a real CSRF check) rather than just a lookup key.
+def _authorization_url_sync(flow: Flow) -> tuple[str, str, str]:
     auth_url, state = flow.authorization_url(
         access_type="offline", prompt="consent", include_granted_scopes="true"
     )
-    _pending_verifiers[state] = flow.code_verifier
+    return auth_url, state, flow.code_verifier
+
+
+async def get_authorization_url(intent: str, user_id: str | None, db) -> str:
+    flow = _build_flow()
+    auth_url, state, code_verifier = await asyncio.to_thread(_authorization_url_sync, flow)
+    now = datetime.now(timezone.utc)
+    await db.oauth_states.insert_one(
+        {
+            "_id": state,
+            "code_verifier": code_verifier,
+            "intent": intent,
+            "user_id": user_id,
+            "created_at": now,
+            "expires_at": now + timedelta(seconds=OAUTH_STATE_TTL_SECONDS),
+        }
+    )
     return auth_url
 
 
-async def get_authorization_url() -> str:
-    return await asyncio.to_thread(_authorization_url_sync)
-
-
-def _exchange_code_sync(code: str, state: str | None) -> Credentials:
+def _exchange_code_sync(code: str, code_verifier: str | None) -> Credentials:
     flow = _build_flow()
-    code_verifier = _pending_verifiers.pop(state, None) if state else None
     flow.fetch_token(code=code, code_verifier=code_verifier)
     return flow.credentials
 
 
-async def exchange_code(code: str, state: str | None) -> Credentials:
-    return await asyncio.to_thread(_exchange_code_sync, code, state)
+async def exchange_code(code: str, state: str | None, db) -> tuple[Credentials, dict]:
+    if not state:
+        raise ValueError("Missing OAuth state")
+    oauth_state = await db.oauth_states.find_one_and_delete({"_id": state})
+    if not oauth_state:
+        raise ValueError("Unknown or already-used OAuth state")
+    now = datetime.now(timezone.utc)
+    expires_at = oauth_state["expires_at"]
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= now:
+        raise ValueError("Expired OAuth state")
+    creds = await asyncio.to_thread(_exchange_code_sync, code, oauth_state.get("code_verifier"))
+    return creds, oauth_state
 
 
 def _get_profile_email_sync(creds: Credentials) -> str:
@@ -74,6 +104,19 @@ def _get_profile_email_sync(creds: Credentials) -> str:
 
 async def get_profile_email(creds: Credentials) -> str:
     return await asyncio.to_thread(_get_profile_email_sync, creds)
+
+
+def _verify_id_token_sync(id_token_str: str) -> dict:
+    claims = google_id_token.verify_oauth2_token(id_token_str, Request(), audience=settings.google_client_id)
+    if not claims.get("email_verified"):
+        raise ValueError("Google identity's email is not verified")
+    return claims
+
+
+async def verify_id_token(creds: Credentials) -> dict:
+    if not creds.id_token:
+        raise ValueError("No ID token on credentials — was the 'openid' scope granted?")
+    return await asyncio.to_thread(_verify_id_token_sync, creds.id_token)
 
 
 def credentials_from_account(account: dict) -> Credentials:

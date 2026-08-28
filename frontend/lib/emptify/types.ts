@@ -2,6 +2,23 @@ export type Role = "exec" | "ea";
 
 export type Screen = "board" | "voice" | "connect" | "queue" | "ready" | "detail";
 
+export interface UserSummary {
+  id: string;
+  name: string;
+  email: string;
+  picture: string | null;
+}
+
+export interface Me extends UserSummary {
+  ea: UserSummary | null;
+  eaOfExec: UserSummary | null;
+}
+
+export type EaRelationshipStatus =
+  | { status: "none" }
+  | { status: "pending"; eaEmail: string }
+  | { status: "linked"; ea: UserSummary };
+
 export type AccountId = string;
 
 export type AccountStatus = "connected" | "expiring" | "reconnect";

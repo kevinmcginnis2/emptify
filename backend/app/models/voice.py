@@ -11,6 +11,8 @@ class VoiceTrait(BaseModel):
 
 
 class VoiceProfileDoc(BaseModel):
+    exec_user_id: str
+    mode: VoiceMode
     sample_size: str
     rebuilding: bool = False
     notes: str = ""

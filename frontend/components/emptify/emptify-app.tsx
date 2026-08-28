@@ -13,13 +13,16 @@ import { ConfirmSendDialog } from "./confirm-send-dialog";
 import { ConfirmDeleteDialog } from "./confirm-delete-dialog";
 import { EmptifyToast } from "./toast";
 import * as api from "@/lib/emptify/api";
+import { UnauthorizedError } from "@/lib/emptify/api";
 import {
   Account,
   AccountId,
   ConfirmDeleteDialogState,
   ConfirmDialogState,
+  EaRelationshipStatus,
   EmailThread,
   HandoffDialogState,
+  Me,
   Role,
   Screen,
   ToastState,
@@ -39,8 +42,15 @@ const RESTORABLE_SCREENS: Screen[] = ["board", "voice", "connect", "queue", "rea
 const EMPTY_VOICE_PROFILE = { sampleSize: "Loading…", rebuilding: false, notes: "", traits: [] };
 const EMPTY_VOICE_STATE: VoiceState = { client: EMPTY_VOICE_PROFILE, internal: EMPTY_VOICE_PROFILE };
 
+const OAUTH_ERROR_MESSAGES: Record<string, string> = {
+  oauth_failed: "Couldn't complete sign-in with Google — try again.",
+  identity_linked_elsewhere: "That Google account is already linked to a different Emptify sign-in.",
+  account_owned_elsewhere: "That inbox is already connected to a different Emptify account.",
+};
+
 export function EmptifyApp() {
-  const [role, setRole] = useState<Role>("exec");
+  const [me, setMe] = useState<Me | null>(null);
+  const [authReady, setAuthReady] = useState(false);
   const [screen, setScreen] = useState<Screen>("board");
   const [accountFilter, setAccountFilter] = useState<AccountId | "all">("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -51,6 +61,7 @@ export function EmptifyApp() {
   const [emails, setEmails] = useState<EmailThread[]>([]);
   const [boardLoading, setBoardLoading] = useState(false);
   const [voice, setVoice] = useState<VoiceState>(EMPTY_VOICE_STATE);
+  const [eaRelationship, setEaRelationship] = useState<EaRelationshipStatus>({ status: "none" });
 
   const [toast, setToast] = useState<ToastState | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
@@ -64,6 +75,8 @@ export function EmptifyApp() {
   const draftTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const voicePollIntervals = useRef<Record<string, ReturnType<typeof setInterval>>>({});
 
+  const isEaMode = !!me?.eaOfExec;
+
   useEffect(() => {
     return () => {
       if (undoTimer.current) clearTimeout(undoTimer.current);
@@ -74,28 +87,66 @@ export function EmptifyApp() {
     };
   }, []);
 
+  const showToast = useCallback((message: string, showUndo: boolean, undoFn?: () => void) => {
+    if (undoTimer.current) clearTimeout(undoTimer.current);
+    setToast({ message, showUndo, undoFn });
+    undoTimer.current = setTimeout(() => setToast(null), 12000);
+  }, []);
+
+  const undoLast = useCallback(() => {
+    if (toast?.undoFn) toast.undoFn();
+    if (undoTimer.current) clearTimeout(undoTimer.current);
+    setToast(null);
+  }, [toast]);
+
+  // Auth gate: every other screen/effect below is meaningless without a real
+  // session, so this runs first and everything else waits on `authReady`.
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const requestedScreen = params.get("screen");
+    const requestedAccount = params.get("account");
+    const errorParam = params.get("error");
+
+    api
+      .getMe()
+      .then((meResult) => {
+        setMe(meResult);
+        if (requestedScreen && RESTORABLE_SCREENS.includes(requestedScreen as Screen)) {
+          setScreen(requestedScreen as Screen);
+        } else if (meResult.eaOfExec) {
+          setScreen("queue");
+        }
+        if (requestedAccount) setAccountFilter(requestedAccount);
+        if (errorParam) {
+          showToast(OAUTH_ERROR_MESSAGES[errorParam] ?? "Something went wrong connecting that account.", false);
+        }
+        setAuthReady(true);
+      })
+      .catch((err) => {
+        if (err instanceof UnauthorizedError) {
+          window.location.href = "/login";
+        } else {
+          setAuthReady(true); // surface a retry rather than an infinite spinner
+        }
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!authReady) return;
     api.getAccounts().then(setAccounts).catch(() => {});
     api.getVoice().then(setVoice).catch(() => {});
+    api.getEaRelationship().then(setEaRelationship).catch(() => {});
     api
-      .getThreads("withEA")
+      .getThreads("withEA", undefined, isEaMode)
       .then((list) => setEmails((prev) => [...prev.filter((e) => e.status !== "withEA"), ...list]))
       .catch(() => {});
     api
-      .getThreads("readyToSend")
+      .getThreads("readyToSend", undefined, isEaMode)
       .then((list) => setEmails((prev) => [...prev.filter((e) => e.status !== "readyToSend"), ...list]))
       .catch(() => {});
-
-    const params = new URLSearchParams(window.location.search);
-    const requestedScreen = params.get("screen");
-    if (requestedScreen && RESTORABLE_SCREENS.includes(requestedScreen as Screen)) {
-      setScreen(requestedScreen as Screen);
-    }
-    const requestedAccount = params.get("account");
-    if (requestedAccount) {
-      setAccountFilter(requestedAccount);
-    }
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authReady]);
 
   // Keeps the current screen (and, on the board, the account filter) in the
   // URL — except "detail", which has no stable reference until threads come
@@ -136,44 +187,46 @@ export function EmptifyApp() {
   );
 
   useEffect(() => {
-    if (screen !== "board") return;
+    if (!authReady || screen !== "board") return;
     refreshBoard();
-  }, [screen, refreshBoard]);
+  }, [authReady, screen, refreshBoard]);
 
-  // Queue/Ready are visible (read-only for the non-owning role) from both
-  // roles' nav bars now, so refetch whichever one is being visited to keep
-  // it current — mirrors the board's per-visit refetch above, minus the
-  // sync (withEA/readyToSend are plain Mongo reads, no Gmail call).
+  // Queue/Ready refetch whenever visited to keep them current — mirrors the
+  // board's per-visit refetch above, minus the sync (withEA/readyToSend are
+  // plain Mongo reads, no Gmail call). `asEa` follows whichever mode this
+  // session is in (see the auth-gate effect above).
   const refreshQueue = useCallback(
     () =>
       api
-        .getThreads("withEA")
+        .getThreads("withEA", undefined, isEaMode)
         .then((list) => setEmails((prev) => [...prev.filter((e) => e.status !== "withEA"), ...list]))
         .catch(() => {}),
-    []
+    [isEaMode]
   );
   const refreshReady = useCallback(
     () =>
       api
-        .getThreads("readyToSend")
+        .getThreads("readyToSend", undefined, isEaMode)
         .then((list) => setEmails((prev) => [...prev.filter((e) => e.status !== "readyToSend"), ...list]))
         .catch(() => {}),
-    []
+    [isEaMode]
   );
 
   useEffect(() => {
+    if (!authReady) return;
     if (screen === "queue") refreshQueue();
     else if (screen === "ready") refreshReady();
-  }, [screen, refreshQueue, refreshReady]);
+  }, [authReady, screen, refreshQueue, refreshReady]);
 
-  // Auto-refresh: exec and EA often have the same screen open in separate
-  // sessions at once, so without this, one person's action (send, archive,
-  // handoff) stays invisible to the other until they navigate away and back.
-  // Polls quietly in the background while board/queue/ready is the active
-  // screen, paused while the tab isn't visible (no point paying for a real
-  // Gmail+Claude sync nobody's looking at), and refreshes immediately the
+  // Auto-refresh: an exec and their EA often have the same screen open in
+  // separate sessions at once, so without this, one person's action (send,
+  // archive, handoff) stays invisible to the other until they navigate away
+  // and back. Polls quietly in the background while board/queue/ready is the
+  // active screen, paused while the tab isn't visible (no point paying for a
+  // real Gmail+Claude sync nobody's looking at), and refreshes immediately the
   // moment the tab regains focus so switching back always shows current data.
   useEffect(() => {
+    if (!authReady) return;
     if (screen !== "board" && screen !== "queue" && screen !== "ready") return;
 
     const tick = (silent: boolean) => {
@@ -193,7 +246,7 @@ export function EmptifyApp() {
       clearInterval(intervalId);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [screen, refreshBoard, refreshQueue, refreshReady]);
+  }, [authReady, screen, refreshBoard, refreshQueue, refreshReady]);
 
   const getEmail = useCallback((id: string) => emails.find((e) => e.id === id), [emails]);
 
@@ -201,27 +254,12 @@ export function EmptifyApp() {
     setEmails((prev) => prev.map((e) => (e.id === id ? { ...e, ...patch } : e)));
   }, []);
 
-  const showToast = useCallback((message: string, showUndo: boolean, undoFn?: () => void) => {
-    if (undoTimer.current) clearTimeout(undoTimer.current);
-    setToast({ message, showUndo, undoFn });
-    undoTimer.current = setTimeout(() => setToast(null), 12000);
-  }, []);
-
-  const undoLast = useCallback(() => {
-    if (toast?.undoFn) toast.undoFn();
-    if (undoTimer.current) clearTimeout(undoTimer.current);
-    setToast(null);
-  }, [toast]);
-
   const go = useCallback((next: Screen) => setScreen(next), []);
 
-  const setRoleExec = useCallback(() => {
-    setRole("exec");
-    setScreen("board");
-  }, []);
-  const setRoleEA = useCallback(() => {
-    setRole("ea");
-    setScreen("queue");
+  const signOut = useCallback(() => {
+    api.logout().finally(() => {
+      window.location.href = "/login";
+    });
   }, []);
 
   const openEmail = useCallback((id: string, origin: Screen) => {
@@ -242,12 +280,12 @@ export function EmptifyApp() {
       if (draftTimers.current[id]) clearTimeout(draftTimers.current[id]);
       draftTimers.current[id] = setTimeout(() => {
         delete draftTimers.current[id];
-        api.patchDraft(id, val, role).catch(() => {
+        api.patchDraft(id, val).catch(() => {
           showToast("Couldn't save draft — try again.", false);
         });
       }, DRAFT_DEBOUNCE_MS);
     },
-    [role, showToast, updateEmail],
+    [showToast, updateEmail],
   );
 
   const updateNotes = useCallback(
@@ -257,18 +295,18 @@ export function EmptifyApp() {
       if (notesTimers.current[which]) clearTimeout(notesTimers.current[which]);
       notesTimers.current[which] = setTimeout(() => {
         delete notesTimers.current[which];
-        api.patchVoiceNotes(which, val, role).catch(() => {
+        api.patchVoiceNotes(which, val).catch(() => {
           showToast("Couldn't save notes — try again.", false);
         });
       }, NOTES_DEBOUNCE_MS);
     },
-    [role, showToast],
+    [showToast],
   );
 
   const rebuildVoice = useCallback(
     (which: VoiceMode) => {
       api
-        .rebuildVoice(which, role)
+        .rebuildVoice(which)
         .then((profile) => {
           setVoice((prev) => ({ ...prev, [which]: profile }));
 
@@ -295,7 +333,7 @@ export function EmptifyApp() {
         })
         .catch(() => showToast("Couldn't start rebuilding — try again.", false));
     },
-    [role, showToast],
+    [showToast],
   );
 
   const updateDomains = useCallback(
@@ -305,24 +343,24 @@ export function EmptifyApp() {
       if (domainsTimers.current[accId]) clearTimeout(domainsTimers.current[accId]);
       domainsTimers.current[accId] = setTimeout(() => {
         delete domainsTimers.current[accId];
-        api.patchAccountDomains(accId, val, role).catch(() => {
+        api.patchAccountDomains(accId, val).catch(() => {
           showToast("Couldn't save internal domains — try again.", false);
         });
       }, DOMAINS_DEBOUNCE_MS);
     },
-    [role, showToast],
+    [showToast],
   );
 
   const reconnectAccount = useCallback(
     (accId: string) => {
       api
-        .reconnectAccount(accId, role)
+        .reconnectAccount(accId)
         .then((authUrl) => {
           window.location.href = authUrl;
         })
         .catch(() => showToast("Couldn't start reconnect — try again.", false));
     },
-    [role, showToast],
+    [showToast],
   );
 
   const connectNewAccount = useCallback(() => {
@@ -338,6 +376,29 @@ export function EmptifyApp() {
       });
   }, [showToast]);
 
+  const inviteEa = useCallback(
+    (email: string) => {
+      api
+        .inviteEa(email)
+        .then((res) => {
+          setEaRelationship(res);
+          showToast(res.status === "linked" ? "Assistant linked." : "Invited — pending their sign-in.", false);
+        })
+        .catch(() => showToast("Couldn't invite — try again.", false));
+    },
+    [showToast],
+  );
+
+  const revokeEa = useCallback(() => {
+    api
+      .deleteEaRelationship()
+      .then(() => {
+        setEaRelationship({ status: "none" });
+        showToast("Removed.", false);
+      })
+      .catch(() => showToast("Couldn't remove — try again.", false));
+  }, [showToast]);
+
   const openHandoffDialog = useCallback((id: string) => setHandoffDialog({ emailId: id, note: "" }), []);
   const cancelHandoff = useCallback(() => setHandoffDialog(null), []);
   const onHandoffNoteChange = useCallback(
@@ -348,7 +409,7 @@ export function EmptifyApp() {
     if (!handoffDialog) return;
     const { emailId, note } = handoffDialog;
     api
-      .postHandoff(emailId, note, role)
+      .postHandoff(emailId, note)
       .then((updated) => {
         updateEmail(emailId, updated);
         setHandoffDialog(null);
@@ -356,10 +417,10 @@ export function EmptifyApp() {
           setScreen(detailOrigin);
           setSelectedId(null);
         }
-        showToast("Handed to Theo Banks.", false);
+        showToast(`Handed to ${eaRelationship.status === "linked" ? eaRelationship.ea.name : "your EA"}.`, false);
       })
       .catch(() => showToast("Couldn't hand off — try again.", false));
-  }, [handoffDialog, role, updateEmail, screen, detailOrigin, showToast]);
+  }, [handoffDialog, updateEmail, screen, detailOrigin, showToast, eaRelationship]);
 
   const openSendConfirm = useCallback(
     (id: string) => setConfirmDialog({ emailId: id, cc: getEmail(id)?.ccEmails ?? [] }),
@@ -374,11 +435,11 @@ export function EmptifyApp() {
   const undoPendingAction = useCallback(
     (id: string) => {
       api
-        .undoThread(id, role)
+        .undoThread(id)
         .then((res) => updateEmail(id, { status: res.status as EmailThread["status"] }))
         .catch(() => showToast("Couldn't undo — try again.", false));
     },
-    [role, showToast, updateEmail],
+    [showToast, updateEmail],
   );
 
   const confirmSendNow = useCallback(() => {
@@ -387,7 +448,7 @@ export function EmptifyApp() {
     const em = getEmail(id);
     if (!em) return;
     api
-      .sendThread(id, role, confirmDialog.cc)
+      .sendThread(id, confirmDialog.cc)
       .then(() => {
         updateEmail(id, { status: "sent" });
         setConfirmDialog(null);
@@ -398,12 +459,12 @@ export function EmptifyApp() {
         showToast(`Sent from ${em.accountEmail}.`, true, () => undoPendingAction(id));
       })
       .catch(() => showToast("Couldn't send — try again.", false));
-  }, [confirmDialog, getEmail, role, screen, detailOrigin, showToast, undoPendingAction, updateEmail]);
+  }, [confirmDialog, getEmail, screen, detailOrigin, showToast, undoPendingAction, updateEmail]);
 
   const archiveEmail = useCallback(
     (id: string) => {
       api
-        .archiveThread(id, role)
+        .archiveThread(id)
         .then(() => {
           updateEmail(id, { status: "archived" });
           if (screen === "detail") {
@@ -414,13 +475,13 @@ export function EmptifyApp() {
         })
         .catch(() => showToast("Couldn't archive — try again.", false));
     },
-    [role, screen, detailOrigin, showToast, undoPendingAction, updateEmail],
+    [screen, detailOrigin, showToast, undoPendingAction, updateEmail],
   );
 
   const skipEmail = useCallback(
     (id: string) => {
       api
-        .skipThread(id, role)
+        .skipThread(id)
         .then(() => {
           updateEmail(id, { status: "skipped" });
           if (screen === "detail") {
@@ -431,23 +492,23 @@ export function EmptifyApp() {
         })
         .catch(() => showToast("Couldn't skip — try again.", false));
     },
-    [role, screen, detailOrigin, showToast, updateEmail],
+    [screen, detailOrigin, showToast, updateEmail],
   );
 
   const markReadEmail = useCallback(
     (id: string) => {
       api
-        .markReadThread(id, role)
+        .markReadThread(id)
         .then((updated) => updateEmail(id, updated))
         .catch(() => showToast("Couldn't mark read — try again.", false));
     },
-    [role, updateEmail, showToast],
+    [updateEmail, showToast],
   );
 
   const removeEmail = useCallback(
     (id: string) => {
       api
-        .removeThread(id, role)
+        .removeThread(id)
         .then(() => {
           updateEmail(id, { status: "removed" });
           if (screen === "detail") {
@@ -458,7 +519,7 @@ export function EmptifyApp() {
         })
         .catch(() => showToast("Couldn't remove — try again.", false));
     },
-    [role, screen, detailOrigin, showToast, updateEmail],
+    [screen, detailOrigin, showToast, updateEmail],
   );
 
   const openDeleteConfirm = useCallback((id: string) => setConfirmDeleteDialog({ emailId: id }), []);
@@ -468,7 +529,7 @@ export function EmptifyApp() {
     if (!confirmDeleteDialog) return;
     const id = confirmDeleteDialog.emailId;
     api
-      .deleteThread(id, role)
+      .deleteThread(id)
       .then(() => {
         updateEmail(id, { status: "deleted" });
         setConfirmDeleteDialog(null);
@@ -479,12 +540,12 @@ export function EmptifyApp() {
         showToast("Deleted.", true, () => undoPendingAction(id));
       })
       .catch(() => showToast("Couldn't delete — try again.", false));
-  }, [confirmDeleteDialog, role, screen, detailOrigin, showToast, undoPendingAction, updateEmail]);
+  }, [confirmDeleteDialog, screen, detailOrigin, showToast, undoPendingAction, updateEmail]);
 
   const unsubscribeEmail = useCallback(
     (id: string) => {
       api
-        .unsubscribeThread(id, role)
+        .unsubscribeThread(id)
         .then((res) => {
           showToast(
             res.mechanism === "one_click" ? "Unsubscribed." : "Sent an unsubscribe request.",
@@ -493,36 +554,36 @@ export function EmptifyApp() {
         })
         .catch(() => showToast("Couldn't unsubscribe — try again.", false));
     },
-    [role, showToast],
+    [showToast],
   );
 
   const markReady = useCallback(
     (id: string) => {
       api
-        .postMarkReady(id, role)
+        .postMarkReady(id)
         .then((updated) => {
           updateEmail(id, updated);
           if (screen === "detail") {
             setScreen("queue");
             setSelectedId(null);
           }
-          showToast("Marked ready — back to Mara's queue.", false);
+          showToast(`Marked ready — back to ${me?.eaOfExec?.name ?? "the exec"}'s queue.`, false);
         })
         .catch(() => showToast("Couldn't mark ready — try again.", false));
     },
-    [role, updateEmail, screen, showToast],
+    [updateEmail, screen, showToast, me],
   );
 
   const applyTone = useCallback(
     (id: string, tone: Tone) => {
       setToneLoading({ id, tone });
       api
-        .postTone(id, tone, role)
+        .postTone(id, tone)
         .then((updated) => updateEmail(id, updated))
         .catch(() => showToast("Couldn't rewrite — try again.", false))
         .finally(() => setToneLoading(null));
     },
-    [role, showToast, updateEmail],
+    [showToast, updateEmail],
   );
 
   const revertTone = useCallback(
@@ -530,11 +591,11 @@ export function EmptifyApp() {
       const em = getEmail(id);
       if (!em || em.versionStack.length === 0) return;
       api
-        .postRevert(id, role)
+        .postRevert(id)
         .then((updated) => updateEmail(id, updated))
         .catch(() => showToast("Couldn't revert — try again.", false));
     },
-    [getEmail, role, showToast, updateEmail],
+    [getEmail, showToast, updateEmail],
   );
 
   const boardEmails = useMemo(
@@ -565,15 +626,29 @@ export function EmptifyApp() {
 
   const confirmEmail = confirmDialog ? getEmail(confirmDialog.emailId) : undefined;
 
+  // The viewer's local role label for DetailScreen's existing show/hide logic —
+  // never sent to the server, purely a display concern derived from real
+  // session state (whether this session is currently in EA mode).
+  const viewRole: Role = isEaMode ? "ea" : "exec";
+
+  if (!authReady) {
+    return (
+      <div className="min-h-screen bg-[var(--color-bg)] text-[var(--color-text)] flex items-center justify-center">
+        <p className="text-emptify-muted text-[14px]">Loading…</p>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[var(--color-bg)] text-[var(--color-text)]">
       <NavBar
-        role={role}
         screen={screen}
         withEACount={withEACount}
         readyCount={readyCount}
-        onSetRole={(r) => (r === "exec" ? setRoleExec() : setRoleEA())}
+        isEaMode={isEaMode}
+        userName={me?.name ?? ""}
         onGo={go}
+        onSignOut={signOut}
       />
 
       <div className="max-w-[1180px] mx-auto p-[var(--space-6)]">
@@ -584,6 +659,9 @@ export function EmptifyApp() {
             onReconnect={reconnectAccount}
             onConnect={connectNewAccount}
             connecting={connecting}
+            eaRelationship={eaRelationship}
+            onInviteEa={inviteEa}
+            onRevokeEa={revokeEa}
           />
         )}
 
@@ -616,7 +694,7 @@ export function EmptifyApp() {
         {screen === "detail" && selectedEmail && (
           <DetailScreen
             email={selectedEmail}
-            role={role}
+            role={viewRole}
             toneLoading={toneLoading}
             onBack={onBack}
             onDraftChange={(val) => updateDraft(selectedEmail.id, val)}

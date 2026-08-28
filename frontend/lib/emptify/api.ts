@@ -1,17 +1,24 @@
-import { Account, EmailThread, Role, Tone, VoiceMode, VoiceProfile, VoiceState } from "./types";
+import { Account, EaRelationshipStatus, EmailThread, Me, Tone, VoiceMode, VoiceProfile, VoiceState } from "./types";
 
 export type ThreadListStatus = "board" | "withEA" | "readyToSend";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
+export class UnauthorizedError extends Error {}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const res = await fetch(`${API_URL}${path}`, {
     ...options,
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
       ...options.headers,
     },
   });
+
+  if (res.status === 401) {
+    throw new UnauthorizedError("Not authenticated");
+  }
 
   if (!res.ok) {
     let message = res.statusText;
@@ -28,8 +35,32 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-function roleHeaders(role: Role): HeadersInit {
-  return { "X-Role": role };
+export async function getMe(): Promise<Me> {
+  return request<Me>("/api/v1/auth/me");
+}
+
+export async function getLoginUrl(): Promise<string> {
+  const { authUrl } = await request<{ authUrl: string }>("/api/v1/auth/login");
+  return authUrl;
+}
+
+export async function logout(): Promise<void> {
+  await request("/api/v1/auth/logout", { method: "POST" });
+}
+
+export async function getEaRelationship(): Promise<EaRelationshipStatus> {
+  return request<EaRelationshipStatus>("/api/v1/relationships");
+}
+
+export async function inviteEa(email: string): Promise<EaRelationshipStatus> {
+  return request<EaRelationshipStatus>("/api/v1/relationships", {
+    method: "POST",
+    body: JSON.stringify({ eaEmail: email }),
+  });
+}
+
+export async function deleteEaRelationship(): Promise<void> {
+  await request("/api/v1/relationships", { method: "DELETE" });
 }
 
 export async function getAccounts(): Promise<Account[]> {
@@ -41,18 +72,16 @@ export async function getConnectUrl(): Promise<string> {
   return authUrl;
 }
 
-export async function patchAccountDomains(id: string, domains: string, role: Role): Promise<Account> {
+export async function patchAccountDomains(id: string, domains: string): Promise<Account> {
   return request<Account>(`/api/v1/accounts/${id}`, {
     method: "PATCH",
-    headers: roleHeaders(role),
     body: JSON.stringify({ internalDomains: domains }),
   });
 }
 
-export async function reconnectAccount(id: string, role: Role): Promise<string> {
+export async function reconnectAccount(id: string): Promise<string> {
   const { authUrl } = await request<{ authUrl: string }>(`/api/v1/accounts/${id}/reconnect`, {
     method: "POST",
-    headers: roleHeaders(role),
   });
   return authUrl;
 }
@@ -61,118 +90,88 @@ export async function getVoice(): Promise<VoiceState> {
   return request<VoiceState>("/api/v1/voice");
 }
 
-export async function patchVoiceNotes(mode: VoiceMode, notes: string, role: Role): Promise<VoiceProfile> {
+export async function patchVoiceNotes(mode: VoiceMode, notes: string): Promise<VoiceProfile> {
   return request<VoiceProfile>(`/api/v1/voice/${mode}`, {
     method: "PATCH",
-    headers: roleHeaders(role),
     body: JSON.stringify({ notes }),
   });
 }
 
-export async function rebuildVoice(mode: VoiceMode, role: Role): Promise<VoiceProfile> {
-  return request<VoiceProfile>(`/api/v1/voice/${mode}/rebuild`, {
-    method: "POST",
-    headers: roleHeaders(role),
-  });
+export async function rebuildVoice(mode: VoiceMode): Promise<VoiceProfile> {
+  return request<VoiceProfile>(`/api/v1/voice/${mode}/rebuild`, { method: "POST" });
 }
 
-export async function getThreads(status: ThreadListStatus, account?: string): Promise<EmailThread[]> {
+export async function getThreads(
+  status: ThreadListStatus,
+  account?: string,
+  asEa?: boolean,
+): Promise<EmailThread[]> {
   const params = new URLSearchParams({ status });
   if (account) params.set("account", account);
+  if (asEa) params.set("as_ea", "true");
   return request<EmailThread[]>(`/api/v1/threads?${params.toString()}`);
 }
 
-export async function patchDraft(id: string, draft: string, role: Role): Promise<EmailThread> {
+export async function patchDraft(id: string, draft: string): Promise<EmailThread> {
   return request<EmailThread>(`/api/v1/threads/${id}/draft`, {
     method: "PATCH",
-    headers: roleHeaders(role),
     body: JSON.stringify({ draft }),
   });
 }
 
-export async function postTone(id: string, tone: Tone, role: Role): Promise<EmailThread> {
+export async function postTone(id: string, tone: Tone): Promise<EmailThread> {
   return request<EmailThread>(`/api/v1/threads/${id}/tone`, {
     method: "POST",
-    headers: roleHeaders(role),
     body: JSON.stringify({ tone }),
   });
 }
 
-export async function postRevert(id: string, role: Role): Promise<EmailThread> {
-  return request<EmailThread>(`/api/v1/threads/${id}/revert`, {
-    method: "POST",
-    headers: roleHeaders(role),
-  });
+export async function postRevert(id: string): Promise<EmailThread> {
+  return request<EmailThread>(`/api/v1/threads/${id}/revert`, { method: "POST" });
 }
 
-export async function sendThread(id: string, role: Role, cc: string[] = []): Promise<{ status: string }> {
+export async function sendThread(id: string, cc: string[] = []): Promise<{ status: string }> {
   return request(`/api/v1/threads/${id}/send`, {
     method: "POST",
-    headers: roleHeaders(role),
     body: JSON.stringify({ cc }),
   });
 }
 
-export async function archiveThread(id: string, role: Role): Promise<{ status: string }> {
-  return request(`/api/v1/threads/${id}/archive`, {
-    method: "POST",
-    headers: roleHeaders(role),
-  });
+export async function archiveThread(id: string): Promise<{ status: string }> {
+  return request(`/api/v1/threads/${id}/archive`, { method: "POST" });
 }
 
-export async function skipThread(id: string, role: Role): Promise<{ status: string }> {
-  return request(`/api/v1/threads/${id}/skip`, {
-    method: "POST",
-    headers: roleHeaders(role),
-  });
+export async function skipThread(id: string): Promise<{ status: string }> {
+  return request(`/api/v1/threads/${id}/skip`, { method: "POST" });
 }
 
-export async function markReadThread(id: string, role: Role): Promise<EmailThread> {
-  return request<EmailThread>(`/api/v1/threads/${id}/mark-read`, {
-    method: "POST",
-    headers: roleHeaders(role),
-  });
+export async function markReadThread(id: string): Promise<EmailThread> {
+  return request<EmailThread>(`/api/v1/threads/${id}/mark-read`, { method: "POST" });
 }
 
-export async function removeThread(id: string, role: Role): Promise<{ status: string }> {
-  return request(`/api/v1/threads/${id}/remove`, {
-    method: "POST",
-    headers: roleHeaders(role),
-  });
+export async function removeThread(id: string): Promise<{ status: string }> {
+  return request(`/api/v1/threads/${id}/remove`, { method: "POST" });
 }
 
-export async function deleteThread(id: string, role: Role): Promise<{ status: string }> {
-  return request(`/api/v1/threads/${id}/delete`, {
-    method: "POST",
-    headers: roleHeaders(role),
-  });
+export async function deleteThread(id: string): Promise<{ status: string }> {
+  return request(`/api/v1/threads/${id}/delete`, { method: "POST" });
 }
 
-export async function unsubscribeThread(id: string, role: Role): Promise<{ mechanism: string }> {
-  return request(`/api/v1/threads/${id}/unsubscribe`, {
-    method: "POST",
-    headers: roleHeaders(role),
-  });
+export async function unsubscribeThread(id: string): Promise<{ mechanism: string }> {
+  return request(`/api/v1/threads/${id}/unsubscribe`, { method: "POST" });
 }
 
-export async function undoThread(id: string, role: Role): Promise<{ status: string }> {
-  return request(`/api/v1/threads/${id}/undo`, {
-    method: "POST",
-    headers: roleHeaders(role),
-  });
+export async function undoThread(id: string): Promise<{ status: string }> {
+  return request(`/api/v1/threads/${id}/undo`, { method: "POST" });
 }
 
-export async function postHandoff(id: string, note: string, role: Role): Promise<EmailThread> {
+export async function postHandoff(id: string, note: string): Promise<EmailThread> {
   return request<EmailThread>(`/api/v1/threads/${id}/handoff`, {
     method: "POST",
-    headers: roleHeaders(role),
     body: JSON.stringify({ note }),
   });
 }
 
-export async function postMarkReady(id: string, role: Role): Promise<EmailThread> {
-  return request<EmailThread>(`/api/v1/threads/${id}/mark-ready`, {
-    method: "POST",
-    headers: roleHeaders(role),
-  });
+export async function postMarkReady(id: string): Promise<EmailThread> {
+  return request<EmailThread>(`/api/v1/threads/${id}/mark-ready`, { method: "POST" });
 }

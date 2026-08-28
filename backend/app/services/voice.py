@@ -97,7 +97,7 @@ def classify_domain(to_header: str, internal_domains: str) -> str:
     return "internal" if domain in internal_set else "client"
 
 
-async def collect_samples(mode: str) -> tuple[list[str], int, int]:
+async def collect_samples(mode: str, exec_user_id) -> tuple[list[str], int, int]:
     """Returns (samples_for_llm, qualifying_count, total_sent_estimate)."""
     db = get_db()
     since_date = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y/%m/%d")
@@ -106,7 +106,7 @@ async def collect_samples(mode: str) -> tuple[list[str], int, int]:
     qualifying_count = 0
     total_estimate = 0
 
-    async for account in db.accounts.find({"status": "connected"}):
+    async for account in db.accounts.find({"status": "connected", "user_id": exec_user_id}):
         creds, refreshed = await gmail.get_valid_credentials(account)
         if refreshed:
             await db.accounts.update_one({"_id": account["_id"]}, {"$set": refreshed})
@@ -196,19 +196,20 @@ async def extract_traits_and_notes(mode: str, samples: list[str]) -> tuple[list[
     return await asyncio.to_thread(_extract_traits_sync, mode, samples)
 
 
-async def rebuild_profile(mode: str) -> None:
+async def rebuild_profile(mode: str, exec_user_id) -> None:
     db = get_db()
+    key = {"exec_user_id": exec_user_id, "mode": mode}
     try:
-        samples, qualifying_count, total_estimate = await collect_samples(mode)
+        samples, qualifying_count, total_estimate = await collect_samples(mode, exec_user_id)
         traits, default_notes = await extract_traits_and_notes(mode, samples)
 
         sample_size = f"{qualifying_count} of {total_estimate} sent emails (last 90 days)"
-        existing = await db.voice_profiles.find_one({"_id": mode})
+        existing = await db.voice_profiles.find_one(key)
         update: dict = {"sample_size": sample_size, "rebuilding": False, "traits": traits}
         if not existing or not existing.get("notes"):
             update["notes"] = default_notes
 
-        await db.voice_profiles.update_one({"_id": mode}, {"$set": update}, upsert=True)
+        await db.voice_profiles.update_one(key, {"$set": update}, upsert=True)
     except Exception:
-        await db.voice_profiles.update_one({"_id": mode}, {"$set": {"rebuilding": False}}, upsert=True)
+        await db.voice_profiles.update_one(key, {"$set": {"rebuilding": False}}, upsert=True)
         raise

@@ -1,27 +1,25 @@
 "use client";
 
-import { Role, Screen } from "@/lib/emptify/types";
+import { Screen } from "@/lib/emptify/types";
 
 interface NavBarProps {
-  role: Role;
   screen: Screen;
   withEACount: number;
   readyCount: number;
-  onSetRole: (role: Role) => void;
+  isEaMode: boolean;
+  userName: string;
   onGo: (screen: Screen) => void;
+  onSignOut: () => void;
 }
 
-export function NavBar({ role, screen, withEACount, readyCount, onSetRole, onGo }: NavBarProps) {
-  const isExec = role === "exec";
-  const isEA = role === "ea";
-
+export function NavBar({ screen, withEACount, readyCount, isEaMode, userName, onGo, onSignOut }: NavBarProps) {
   return (
     <div className="border-b border-[var(--color-divider)] sticky top-0 bg-[var(--color-bg)] z-20">
       <div className="nav max-w-[1180px] mx-auto px-[var(--space-6)] gap-[var(--space-6)] flex items-center py-[var(--space-3)]">
         <div className="nav-brand mr-auto">Emptify</div>
 
         <div className="flex items-center gap-[var(--space-1)]">
-          {isExec && (
+          {!isEaMode && (
             <>
               <a
                 href="#"
@@ -58,7 +56,7 @@ export function NavBar({ role, screen, withEACount, readyCount, onSetRole, onGo 
               </a>
             </>
           )}
-          {isEA && (
+          {isEaMode && (
             <a
               href="#"
               className="nav-item"
@@ -74,7 +72,7 @@ export function NavBar({ role, screen, withEACount, readyCount, onSetRole, onGo 
         </div>
 
         <div className="flex items-center gap-[var(--space-4)] ml-auto">
-          {isExec && (
+          {!isEaMode && (
             <>
               <a
                 href="#"
@@ -100,7 +98,7 @@ export function NavBar({ role, screen, withEACount, readyCount, onSetRole, onGo 
               </a>
             </>
           )}
-          {isEA && (
+          {isEaMode && (
             <>
               <span className="tag tag-neutral">In queue ({withEACount})</span>
               <a
@@ -117,28 +115,10 @@ export function NavBar({ role, screen, withEACount, readyCount, onSetRole, onGo 
             </>
           )}
 
-          <div className="seg">
-            <label className="seg-opt" data-active={isExec}>
-              <input
-                type="radio"
-                name="role"
-                className="sr-only"
-                checked={isExec}
-                onChange={() => onSetRole("exec")}
-              />
-              Exec
-            </label>
-            <label className="seg-opt" data-active={isEA}>
-              <input
-                type="radio"
-                name="role"
-                className="sr-only"
-                checked={isEA}
-                onChange={() => onSetRole("ea")}
-              />
-              EA
-            </label>
-          </div>
+          <span className="text-emptify-muted text-[13px]">{userName}</span>
+          <button type="button" className="btn-emptify btn-emptify-ghost" onClick={onSignOut}>
+            Sign out
+          </button>
         </div>
       </div>
     </div>
