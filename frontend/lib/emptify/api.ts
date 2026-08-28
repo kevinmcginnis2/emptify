@@ -104,3 +104,31 @@ export async function postRevert(id: string, role: Role): Promise<EmailThread> {
     headers: roleHeaders(role),
   });
 }
+
+export async function sendThread(id: string, role: Role): Promise<{ status: string }> {
+  return request(`/api/v1/threads/${id}/send`, {
+    method: "POST",
+    headers: roleHeaders(role),
+  });
+}
+
+export async function archiveThread(id: string, role: Role): Promise<{ status: string }> {
+  return request(`/api/v1/threads/${id}/archive`, {
+    method: "POST",
+    headers: roleHeaders(role),
+  });
+}
+
+export async function skipThread(id: string, role: Role): Promise<{ status: string }> {
+  return request(`/api/v1/threads/${id}/skip`, {
+    method: "POST",
+    headers: roleHeaders(role),
+  });
+}
+
+export async function undoThread(id: string, role: Role): Promise<{ status: string }> {
+  return request(`/api/v1/threads/${id}/undo`, {
+    method: "POST",
+    headers: roleHeaders(role),
+  });
+}

@@ -286,49 +286,68 @@ export function EmptifyApp() {
 
   const openSendConfirm = useCallback((id: string) => setConfirmDialog({ emailId: id }), []);
   const cancelSend = useCallback(() => setConfirmDialog(null), []);
+
+  const undoPendingAction = useCallback(
+    (id: string) => {
+      api
+        .undoThread(id, role)
+        .then((res) => updateEmail(id, { status: res.status as EmailThread["status"] }))
+        .catch(() => showToast("Couldn't undo — try again.", false));
+    },
+    [role, showToast, updateEmail],
+  );
+
   const confirmSendNow = useCallback(() => {
     if (!confirmDialog) return;
     const id = confirmDialog.emailId;
     const em = getEmail(id);
     if (!em) return;
-    const prevStatus = em.status;
-    updateEmail(id, { status: "sent", prevStatus });
-    setConfirmDialog(null);
-    if (screen === "detail") {
-      setScreen(detailOrigin);
-      setSelectedId(null);
-    }
-    showToast(`Sent from ${em.accountEmail}.`, true, () => updateEmail(id, { status: prevStatus }));
-  }, [confirmDialog, getEmail, updateEmail, screen, detailOrigin, showToast]);
+    api
+      .sendThread(id, role)
+      .then(() => {
+        updateEmail(id, { status: "sent" });
+        setConfirmDialog(null);
+        if (screen === "detail") {
+          setScreen(detailOrigin);
+          setSelectedId(null);
+        }
+        showToast(`Sent from ${em.accountEmail}.`, true, () => undoPendingAction(id));
+      })
+      .catch(() => showToast("Couldn't send — try again.", false));
+  }, [confirmDialog, getEmail, role, screen, detailOrigin, showToast, undoPendingAction, updateEmail]);
 
   const archiveEmail = useCallback(
     (id: string) => {
-      const em = getEmail(id);
-      if (!em) return;
-      const prevStatus = em.status;
-      updateEmail(id, { status: "archived" });
-      if (screen === "detail") {
-        setScreen(detailOrigin);
-        setSelectedId(null);
-      }
-      showToast("Archived.", true, () => updateEmail(id, { status: prevStatus }));
+      api
+        .archiveThread(id, role)
+        .then(() => {
+          updateEmail(id, { status: "archived" });
+          if (screen === "detail") {
+            setScreen(detailOrigin);
+            setSelectedId(null);
+          }
+          showToast("Archived.", true, () => undoPendingAction(id));
+        })
+        .catch(() => showToast("Couldn't archive — try again.", false));
     },
-    [getEmail, updateEmail, screen, detailOrigin, showToast],
+    [role, screen, detailOrigin, showToast, undoPendingAction, updateEmail],
   );
 
   const skipEmail = useCallback(
     (id: string) => {
-      const em = getEmail(id);
-      if (!em) return;
-      const prevStatus = em.status;
-      updateEmail(id, { status: "skipped" });
-      if (screen === "detail") {
-        setScreen(detailOrigin);
-        setSelectedId(null);
-      }
-      showToast("Skipped from the board.", true, () => updateEmail(id, { status: prevStatus }));
+      api
+        .skipThread(id, role)
+        .then(() => {
+          updateEmail(id, { status: "skipped" });
+          if (screen === "detail") {
+            setScreen(detailOrigin);
+            setSelectedId(null);
+          }
+          showToast("Skipped from the board.", false);
+        })
+        .catch(() => showToast("Couldn't skip — try again.", false));
     },
-    [getEmail, updateEmail, screen, detailOrigin, showToast],
+    [role, screen, detailOrigin, showToast, updateEmail],
   );
 
   const markReady = useCallback(

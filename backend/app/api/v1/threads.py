@@ -13,7 +13,7 @@ from app.services.triage import sync_board
 
 router = APIRouter(prefix="/threads", tags=["threads"])
 
-SEND_UNDO_WINDOW_SECONDS = 12
+UNDO_WINDOW_SECONDS = 12
 VALID_STATUSES = ("board", "withEA", "readyToSend")
 EDITABLE_STATUSES = ("board", "withEA", "readyToSend")
 
@@ -77,7 +77,7 @@ def _reply_subject(subject: str) -> str:
 
 
 async def dispatch_send(thread_id: str, actor: str) -> None:
-    await asyncio.sleep(SEND_UNDO_WINDOW_SECONDS)
+    await asyncio.sleep(UNDO_WINDOW_SECONDS)
     db = get_db()
     thread = await db.threads.find_one({"_id": thread_id})
     if not thread or thread.get("pending_action") != "send":
@@ -124,7 +124,7 @@ async def send_thread(
         raise HTTPException(status_code=409, detail="Thread is not in a sendable status")
 
     prev_status = thread["status"]
-    dispatch_at = datetime.now(timezone.utc) + timedelta(seconds=SEND_UNDO_WINDOW_SECONDS)
+    dispatch_at = datetime.now(timezone.utc) + timedelta(seconds=UNDO_WINDOW_SECONDS)
     await db.threads.update_one(
         {"_id": thread_id},
         {
@@ -138,6 +138,84 @@ async def send_thread(
     )
     background_tasks.add_task(dispatch_send, thread_id, actor)
     return {"status": "sent"}
+
+
+async def dispatch_archive(thread_id: str, actor: str) -> None:
+    await asyncio.sleep(UNDO_WINDOW_SECONDS)
+    db = get_db()
+    thread = await db.threads.find_one({"_id": thread_id})
+    if not thread or thread.get("pending_action") != "archive":
+        return
+
+    account = await db.accounts.find_one({"_id": thread["account_id"]})
+    creds, refreshed = await gmail.get_valid_credentials(account)
+    if refreshed:
+        await db.accounts.update_one({"_id": account["_id"]}, {"$set": refreshed})
+
+    await gmail.archive_thread(creds, thread_id)
+
+    await db.threads.update_one(
+        {"_id": thread_id},
+        {"$unset": {"pending_action": "", "pending_dispatch_at": "", "prev_status": ""}},
+    )
+    await write_audit_entry(
+        db,
+        thread_id=thread_id,
+        actor=actor,
+        action="archive",
+        account_email=thread["account_email"],
+    )
+
+
+@router.post("/{thread_id}/archive")
+async def archive_thread_route(
+    thread_id: str,
+    background_tasks: BackgroundTasks,
+    role=Depends(require_exec),
+    db=Depends(get_db),
+):
+    _role, actor = role
+    thread = await db.threads.find_one({"_id": thread_id})
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    if thread["status"] != "board":
+        raise HTTPException(status_code=409, detail="Thread is not in an archivable status")
+
+    prev_status = thread["status"]
+    dispatch_at = datetime.now(timezone.utc) + timedelta(seconds=UNDO_WINDOW_SECONDS)
+    await db.threads.update_one(
+        {"_id": thread_id},
+        {
+            "$set": {
+                "status": "archived",
+                "prev_status": prev_status,
+                "pending_action": "archive",
+                "pending_dispatch_at": dispatch_at,
+            }
+        },
+    )
+    background_tasks.add_task(dispatch_archive, thread_id, actor)
+    return {"status": "archived"}
+
+
+@router.post("/{thread_id}/skip")
+async def skip_thread(thread_id: str, role=Depends(require_exec), db=Depends(get_db)):
+    _role, actor = role
+    thread = await db.threads.find_one({"_id": thread_id})
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    if thread["status"] != "board":
+        raise HTTPException(status_code=409, detail="Thread is not in a skippable status")
+
+    await db.threads.update_one({"_id": thread_id}, {"$set": {"status": "skipped"}})
+    await write_audit_entry(
+        db,
+        thread_id=thread_id,
+        actor=actor,
+        action="skip",
+        account_email=thread["account_email"],
+    )
+    return {"status": "skipped"}
 
 
 @router.post("/{thread_id}/undo")
