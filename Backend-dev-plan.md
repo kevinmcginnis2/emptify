@@ -445,13 +445,36 @@ Note: `JWT_SECRET` / `JWT_EXPIRES_IN` from the generic template are intentionall
 
 ---
 
-### 🔒 S10 — Hardening Candidates (not yet scoped)
+### 🔒 S10 — User Accounts & Login (+ Hardening Candidates)
 
-**Objectives:** carried forward from the S9 scoping conversation (items not picked for S9) plus what surfaced while building/verifying S9. Not scoped or prioritized — needs its own scoping conversation when it starts.
+**Objectives:** the app went live for testing after S9, and its complete absence of app-level authentication became an immediate real problem, not a theoretical one — anyone with the URL gets full read/write access to the real connected Gmail inboxes with no login screen in front of it. This is now the top-priority item in S10, ahead of the hardening candidates carried forward from the S9 scoping conversation. Not scoped in code-level detail yet — needs its own product conversation, same as every sprint before it.
 
-**Candidates:**
-- **Plaintext OAuth tokens** stored in Mongo (`backend/app/models/account.py`) — known simplification since S2. Now more relevant since hosting/sharing this beyond a local single-user tool is on the table.
-- **No CSRF `state` verification** on the OAuth callback (`backend/app/api/v1/accounts.py`) — same "might host it" motivation as above.
-- **CORS wide open** (`backend/app/main.py`'s `allow_origin_regex=".*"`, commit `cffd9db`) — intentionally loosened mid-S9 to give a collaborating engineer access/review; worth tightening back to an explicit allowlist once that access is no longer needed.
+**🔴 Top priority — unique user accounts & login (multi-tenancy).** Today there is no concept of a "user" anywhere in the system. `X-Role: exec|ea` (`backend/app/api/v1/deps.py`) is the *only* signal on any request — it's a plain header, trivially spoofable, and maps to two hardcoded actor names (`ACTOR_NAMES = {"exec": "Mara Lindqvist", "ea": "Theo Banks"}`) shared by literally anyone who loads the page. None of the Mongo collections (`accounts`, `threads`, `voice_profiles`, `audit_log`) have an owner/`user_id` field at all — they're global to the one database. Real scope, once a product conversation settles the open questions below:
+- A `users` collection with real credentials — needs a decision: email/password (with proper hashing, e.g. `passlib`/`bcrypt`) vs. reusing "Sign in with Google" (the OAuth machinery for Gmail connect already exists, but conflates "who's logged into Emptify" with "which Gmail account is connected" — needs careful scope separation if chosen).
+- A real session/auth layer (signed JWT or server-side session cookie) protecting every API route, replacing the current header-only `require_role`/`require_exec`/`require_ea` chain in `deps.py` with real verified identity.
+- `user_id` added to every tenant-scoped collection and every single query in `backend/app/api/v1/` and `backend/app/services/` scoped to the authenticated user — this touches nearly the whole backend.
+- The hardcoded `Mara Lindqvist`/`Theo Banks` actor names become per-tenant (each user picks their own exec/EA display names at setup) instead of fixed constants.
+- Frontend: real signup/login screens gating everything ahead of the Connect screen, with session persistence.
+- Open product questions for that conversation: password vs. Google-identity login; whether "exec" and "EA" become two separate logins sharing one company's board, or stay one login with the existing role-switcher; and what happens to the 3 already-connected Gmail accounts and their existing thread/audit history when this ships (a one-time migration assigning them to Kevin's own new account is the obvious default, but worth confirming).
+- Depends on knowing the actual hosting setup (cookie domain, HTTPS, same-origin vs. cross-origin frontend/backend) — this session doesn't have visibility into how the live deployment is configured; confirm that at the start of this work.
+
+**Other hardening candidates (carried forward from S9 scoping, lower priority than the above):**
+- **Plaintext OAuth tokens** stored in Mongo (`backend/app/models/account.py`) — known simplification since S2. More relevant now that this is a live, hosted, multi-user-bound app rather than a local dev tool.
+- **No CSRF `state` verification** on the OAuth callback (`backend/app/api/v1/accounts.py`) — same motivation as above.
+- **CORS wide open** (`backend/app/main.py`'s `allow_origin_regex=".*"`, commit `cffd9db`) — intentionally loosened mid-S9 to give a collaborating engineer access/review (likely because the frontend and backend are hosted on different origins); worth tightening back to an explicit allowlist once that access is no longer needed.
 - **Sequential per-message sync classification** (`triage.py` — one Gmail fetch + one Claude call per new/touched thread, in a loop). Only worth parallelizing if backlogs turn out to be common in practice.
 - **Dev-server hygiene** — nothing currently detects or warns about a stale `uvicorn` process already squatting on port 8000; a fresh session can silently verify against stale code with no error beyond a log line (this cost real debugging time during S9 verification). Worth a lightweight fix — a startup port check, or just a documented restart step.
+
+---
+
+### 💳 S11+ — Trial Access & Stripe Billing (early look-ahead, not scoped)
+
+**Objectives:** once S10's user accounts exist, add a timed trial period per user, gate access once it expires, and eventually require payment via Stripe to continue — explicitly a "couple of months out" item, tied to when Stripe gets connected, not something to start now. Captured here only so it isn't lost; needs its own real scoping conversation when it's actually time to build it.
+
+**Rough shape (not yet a task list):**
+- A trial clock per user (e.g. `users.trial_started_at`, length TBD — 14/30 days is typical but undecided) — depends entirely on S10's user accounts existing first.
+- Access gating once the trial expires: some form of middleware/check blocking app functionality (or redirecting to an upgrade/access page) for a user with no active trial and no paid subscription.
+- Stripe integration once connected: checkout flow for starting a subscription, webhook handling to keep subscription status in sync, and a customer portal for managing/canceling — none of this can start until the Stripe account itself is set up, which is explicitly deferred.
+- An "access page" experience for trial-ended / not-yet-subscribed users, distinct from the login screen.
+
+**Definition of Done:** TBD — this section exists to hold the idea, not to commit to an approach yet.
