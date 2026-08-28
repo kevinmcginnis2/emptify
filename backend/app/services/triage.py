@@ -157,6 +157,9 @@ async def sync_account_board(account: dict) -> None:
         from_name, from_email = _parse_from(headers.get("from", ""))
         latest_body = messages[-1]["body"]
 
+        _, reply_to_email = _parse_from(headers.get("reply-to", ""))
+        reply_to_email = reply_to_email or from_email
+
         domain_match = re.search(r"@([\w.-]+)", from_email)
         domain = domain_match.group(1).lower() if domain_match else ""
         voice_mode = classify_domain(from_email, account.get("internal_domains", ""))
@@ -177,6 +180,7 @@ async def sync_account_board(account: dict) -> None:
             "account_email": account["email"],
             "from_name": from_name or from_email,
             "from_email": from_email,
+            "reply_to_email": reply_to_email,
             "subject": subject,
             "bucket": classification.get("bucket", "wait"),
             "reason": classification.get("reason", ""),

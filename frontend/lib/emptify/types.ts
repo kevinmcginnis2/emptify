@@ -45,6 +45,7 @@ export interface EmailThread {
   accountEmail: string;
   from: string;
   fromEmail: string;
+  replyToEmail: string;
   subject: string;
   bucket: Bucket;
   reason: string;

@@ -34,6 +34,7 @@ def _thread_response(doc: dict) -> dict:
         "accountEmail": doc["account_email"],
         "from": doc["from_name"],
         "fromEmail": doc["from_email"],
+        "replyToEmail": doc.get("reply_to_email") or doc["from_email"],
         "subject": doc["subject"],
         "bucket": doc["bucket"],
         "reason": doc["reason"],
@@ -71,6 +72,10 @@ async def list_threads(status: str, account: str | None = None, db=Depends(get_d
     return threads
 
 
+def _reply_subject(subject: str) -> str:
+    return subject if subject.strip().lower().startswith("re:") else f"Re: {subject}"
+
+
 async def dispatch_send(thread_id: str, actor: str) -> None:
     await asyncio.sleep(SEND_UNDO_WINDOW_SECONDS)
     db = get_db()
@@ -85,8 +90,8 @@ async def dispatch_send(thread_id: str, actor: str) -> None:
 
     await gmail.send_message(
         creds,
-        to_email=thread["from_email"],
-        subject=thread["subject"],
+        to_email=thread.get("reply_to_email") or thread["from_email"],
+        subject=_reply_subject(thread["subject"]),
         body_text=thread["draft"],
         gmail_thread_id=thread.get("gmail_thread_id") or None,
     )

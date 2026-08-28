@@ -463,7 +463,7 @@ export function EmptifyApp() {
       <ConfirmSendDialog
         open={!!confirmDialog}
         from={confirmEmail?.accountEmail ?? ""}
-        to={confirmEmail?.fromEmail ?? ""}
+        to={confirmEmail?.replyToEmail ?? ""}
         onCancel={cancelSend}
         onConfirm={confirmSendNow}
       />
