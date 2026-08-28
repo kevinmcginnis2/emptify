@@ -418,3 +418,17 @@ Note: `JWT_SECRET` / `JWT_EXPIRES_IN` from the generic template are intentionall
   - User Test Prompt: "Switch back to Exec, open Ready to send, confirm the card is there with a summary of what changed, then send it and confirm it lands in Sent."
 
 **Definition of Done:** the full handoff → edit → mark-ready → send loop works end-to-end across both roles, with every step reflected in the audit log. Push to `main`.
+
+---
+
+### 🔁 S9 — Post-MVP Hardening & Two-Way Gmail Sync
+
+**Objectives:** items identified during S0–S8 that aren't covered by the original PRD/dev plan at all — not deferred sprint tasks, but real gaps and known simplifications surfaced while building and testing S1–S5. Not scoped in detail yet; scope each task properly when this sprint actually starts.
+
+**Tasks (candidates, not yet fully scoped):**
+- **Two-way Gmail sync.** Everything through S8 only syncs one direction: new mail arriving in Gmail flows into the board. Nothing detects a message being deleted/trashed directly in Gmail (the corresponding thread just sits on the board forever), or a reply being sent directly from Gmail instead of through Emptify (the thread's `messages`/status never update). Fixing this means replacing the date-based `after:` incremental sync built in S5 (`backend/app/services/triage.py`) with Gmail's **History API** (`users.history.list`), which reports actual deltas — messages added/deleted, labels changed — since a stored `historyId` per account, instead of re-querying by date. Needs real product decisions before implementation: what happens to a board card when its Gmail message is deleted (removed? archived?), and what happens when a reply lands in Gmail directly for a thread already mid-triage (new message appended? status change? re-classification?).
+- OAuth tokens are stored as plaintext strings in Mongo (`backend/app/models/account.py`), per the PRD's no-hardening-in-v1 stance — noted explicitly as a known simplification in S2. Revisit if this ever needs to be more than a local dev tool.
+- No CSRF `state` verification on the OAuth callback (`backend/app/api/v1/accounts.py`) — Google round-trips `state` but it's never checked against anything, since there's no session store. Noted in S2.
+- Per-message classification during board sync is sequential (`triage.py`'s `sync_account_board` — one real Gmail fetch + one real Claude call per new message, in a loop). A sync with a backlog of a dozen-plus new messages can take over a minute; the S5 "Syncing…" indicator makes this visible but doesn't make it faster. Worth parallelizing (e.g. `asyncio.gather` over a small batch) if backlogs turn out to be common in practice.
+
+**Definition of Done:** TBD once scoped — likely starts with a product conversation about the two intentional-deletion/reply-outside-the-app behaviors above, same as the S1/S2/S4 scope questions earlier in this build.
