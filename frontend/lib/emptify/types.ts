@@ -16,7 +16,9 @@ export type EmailStatus =
   | "readyToSend"
   | "sent"
   | "archived"
-  | "skipped";
+  | "skipped"
+  | "removed"
+  | "deleted";
 
 export type DraftAuthor = "emptify" | "ea";
 
@@ -52,6 +54,8 @@ export interface EmailThread {
   subject: string;
   bucket: Bucket;
   reason: string;
+  informational: boolean;
+  read: boolean;
   voiceMode: VoiceMode;
   voiceWhy: string;
   messages: Message[];
@@ -99,6 +103,10 @@ export interface HandoffDialogState {
 export interface ConfirmDialogState {
   emailId: string;
   cc: string[];
+}
+
+export interface ConfirmDeleteDialogState {
+  emailId: string;
 }
 
 export interface ToneLoadingState {

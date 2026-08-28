@@ -151,6 +151,15 @@ async def archive_thread(creds: Credentials, gmail_thread_id: str) -> None:
     await asyncio.to_thread(_archive_thread_sync, creds, gmail_thread_id)
 
 
+def _trash_thread_sync(creds: Credentials, gmail_thread_id: str) -> None:
+    service = build("gmail", "v1", credentials=creds)
+    service.users().threads().trash(userId="me", id=gmail_thread_id).execute()
+
+
+async def trash_thread(creds: Credentials, gmail_thread_id: str) -> None:
+    await asyncio.to_thread(_trash_thread_sync, creds, gmail_thread_id)
+
+
 def _list_sent_sync(creds: Credentials, since_date: str, max_results: int) -> tuple[list[str], int]:
     service = build("gmail", "v1", credentials=creds)
     query = f"in:sent after:{since_date}"

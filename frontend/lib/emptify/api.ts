@@ -127,6 +127,34 @@ export async function skipThread(id: string, role: Role): Promise<{ status: stri
   });
 }
 
+export async function markReadThread(id: string, role: Role): Promise<EmailThread> {
+  return request<EmailThread>(`/api/v1/threads/${id}/mark-read`, {
+    method: "POST",
+    headers: roleHeaders(role),
+  });
+}
+
+export async function removeThread(id: string, role: Role): Promise<{ status: string }> {
+  return request(`/api/v1/threads/${id}/remove`, {
+    method: "POST",
+    headers: roleHeaders(role),
+  });
+}
+
+export async function deleteThread(id: string, role: Role): Promise<{ status: string }> {
+  return request(`/api/v1/threads/${id}/delete`, {
+    method: "POST",
+    headers: roleHeaders(role),
+  });
+}
+
+export async function unsubscribeThread(id: string, role: Role): Promise<{ mechanism: string }> {
+  return request(`/api/v1/threads/${id}/unsubscribe`, {
+    method: "POST",
+    headers: roleHeaders(role),
+  });
+}
+
 export async function undoThread(id: string, role: Role): Promise<{ status: string }> {
   return request(`/api/v1/threads/${id}/undo`, {
     method: "POST",

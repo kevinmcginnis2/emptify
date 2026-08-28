@@ -72,11 +72,19 @@ _TRIAGE_TOOL = {
         "properties": {
             "bucket": {"type": "string", "enum": ["today", "week", "wait"]},
             "reason": {"type": "string"},
+            "informational": {
+                "type": "boolean",
+                "description": (
+                    "true if this is a subscription, promotional/marketing email, newsletter, "
+                    "donation/fundraising blast, automated notification or digest, or anything else "
+                    "that doesn't call for a personal reply"
+                ),
+            },
             "handoff_suggested": {"type": "boolean"},
             "handoff_reason": {"type": "string"},
             "draft": {"type": "string"},
         },
-        "required": ["bucket", "reason", "handoff_suggested", "handoff_reason", "draft"],
+        "required": ["bucket", "reason", "informational", "handoff_suggested", "handoff_reason", "draft"],
     },
 }
 
@@ -105,12 +113,16 @@ def _classify_thread_sync(
         f"Body:\n{body[:CLASSIFY_BODY_TRUNCATE]}\n\n"
         "Assign a bucket: 'today' (needs attention today), 'week' (can wait a few days), or 'wait' "
         "(low urgency). Give a one-line, specific reason for that bucket that mentions concrete "
-        "details from the email, not generic language. Then decide whether this looks like something "
-        "an executive assistant usually handles on the exec's behalf (e.g. scheduling requests, "
-        "routine logistics) — if so, set handoff_suggested true with a short handoff_reason; "
-        "otherwise false with an empty handoff_reason. "
-        "Finally, write a complete, ready-to-send draft reply to this email, addressing its specific "
-        f"content. {_voice_profile_clause(voice_traits, voice_notes)}"
+        "details from the email, not generic language. First decide whether this email is "
+        "informational — a subscription, promotional/marketing email, newsletter, donation/fundraising "
+        "blast, automated notification, or digest that doesn't call for a personal reply — and set "
+        "informational accordingly. If informational is true, set handoff_suggested false with an "
+        "empty handoff_reason and leave draft as an empty string. Otherwise, decide whether this looks "
+        "like something an executive assistant usually handles on the exec's behalf (e.g. scheduling "
+        "requests, routine logistics) — if so, set handoff_suggested true with a short handoff_reason; "
+        "otherwise false with an empty handoff_reason. Then write a complete, ready-to-send draft "
+        f"reply to this email, addressing its specific content. "
+        f"{_voice_profile_clause(voice_traits, voice_notes)}"
     )
     resp = client.messages.create(
         model=settings.anthropic_model,
@@ -122,7 +134,14 @@ def _classify_thread_sync(
     for block in resp.content:
         if block.type == "tool_use":
             return block.input
-    return {"bucket": "wait", "reason": "", "handoff_suggested": False, "handoff_reason": "", "draft": ""}
+    return {
+        "bucket": "wait",
+        "reason": "",
+        "informational": False,
+        "handoff_suggested": False,
+        "handoff_reason": "",
+        "draft": "",
+    }
 
 
 async def classify_thread(
@@ -236,6 +255,8 @@ def _classification_fields(
         "subject": subject,
         "voice_mode": voice_mode,
         "voice_why": voice_why,
+        "list_unsubscribe": headers.get("list-unsubscribe", ""),
+        "list_unsubscribe_post": headers.get("list-unsubscribe-post", ""),
     }
     return fields, from_name, latest_body
 
@@ -264,6 +285,8 @@ async def _ingest_new_thread(db, account: dict, creds, gmail_thread_id: str) -> 
         **fields,
         "bucket": classification.get("bucket", "wait"),
         "reason": classification.get("reason", ""),
+        "informational": classification.get("informational", False),
+        "read": False,
         "messages": messages,
         "draft": classification.get("draft", ""),
         "draft_author": "emptify",
@@ -314,6 +337,8 @@ async def _resync_existing_thread(db, account: dict, creds, thread_id: str) -> N
                 **fields,
                 "bucket": classification.get("bucket", "wait"),
                 "reason": classification.get("reason", ""),
+                "informational": classification.get("informational", False),
+                "read": False,
                 "messages": messages,
                 "draft": classification.get("draft", ""),
                 "draft_author": "emptify",

@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from app.api.v1.deps import require_ea, require_exec, require_role
 from app.db import get_db
-from app.services import gmail, handoff as handoff_service, tone as tone_service
+from app.services import gmail, handoff as handoff_service, tone as tone_service, unsubscribe as unsubscribe_service
 from app.services.audit import write_audit_entry
 from app.services.triage import sync_board
 
@@ -52,6 +52,8 @@ def _thread_response(doc: dict) -> dict:
         "subject": doc["subject"],
         "bucket": doc["bucket"],
         "reason": doc["reason"],
+        "informational": doc.get("informational", False),
+        "read": doc.get("read", False),
         "voiceMode": doc["voice_mode"],
         "voiceWhy": doc["voice_why"],
         "messages": doc.get("messages", []),
@@ -245,6 +247,161 @@ async def skip_thread(thread_id: str, role=Depends(require_role), db=Depends(get
         account_email=thread["account_email"],
     )
     return {"status": "skipped"}
+
+
+@router.post("/{thread_id}/mark-read")
+async def mark_read_thread(thread_id: str, role=Depends(require_role), db=Depends(get_db)):
+    role_value, actor = role
+    thread = await db.threads.find_one({"_id": thread_id})
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    _check_actionable(role_value, thread["status"], exec_statuses=("board",))
+
+    doc = await db.threads.find_one_and_update(
+        {"_id": thread_id}, {"$set": {"read": True}}, return_document=True
+    )
+    await write_audit_entry(
+        db,
+        thread_id=thread_id,
+        actor=actor,
+        action="mark_read",
+        account_email=thread["account_email"],
+    )
+    return _thread_response(doc)
+
+
+@router.post("/{thread_id}/remove")
+async def remove_thread(thread_id: str, role=Depends(require_role), db=Depends(get_db)):
+    role_value, actor = role
+    thread = await db.threads.find_one({"_id": thread_id})
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    _check_actionable(role_value, thread["status"], exec_statuses=("board",))
+
+    await db.threads.update_one({"_id": thread_id}, {"$set": {"status": "removed"}})
+    await write_audit_entry(
+        db,
+        thread_id=thread_id,
+        actor=actor,
+        action="remove_from_emptify",
+        account_email=thread["account_email"],
+    )
+    return {"status": "removed"}
+
+
+async def dispatch_delete(thread_id: str, actor: str) -> None:
+    await asyncio.sleep(UNDO_WINDOW_SECONDS)
+    db = get_db()
+    thread = await db.threads.find_one({"_id": thread_id})
+    if not thread or thread.get("pending_action") != "delete":
+        return
+
+    account = await db.accounts.find_one({"_id": thread["account_id"]})
+    creds, refreshed = await gmail.get_valid_credentials(account)
+    if refreshed:
+        await db.accounts.update_one({"_id": account["_id"]}, {"$set": refreshed})
+
+    await gmail.trash_thread(creds, thread_id)
+
+    await db.threads.update_one(
+        {"_id": thread_id},
+        {"$unset": {"pending_action": "", "pending_dispatch_at": "", "prev_status": ""}},
+    )
+    await write_audit_entry(
+        db,
+        thread_id=thread_id,
+        actor=actor,
+        action="delete",
+        account_email=thread["account_email"],
+    )
+
+
+@router.post("/{thread_id}/delete")
+async def delete_thread_route(
+    thread_id: str,
+    background_tasks: BackgroundTasks,
+    role=Depends(require_role),
+    db=Depends(get_db),
+):
+    role_value, actor = role
+    thread = await db.threads.find_one({"_id": thread_id})
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    _check_actionable(role_value, thread["status"], exec_statuses=("board",))
+
+    prev_status = thread["status"]
+    dispatch_at = datetime.now(timezone.utc) + timedelta(seconds=UNDO_WINDOW_SECONDS)
+    await db.threads.update_one(
+        {"_id": thread_id},
+        {
+            "$set": {
+                "status": "deleted",
+                "prev_status": prev_status,
+                "pending_action": "delete",
+                "pending_dispatch_at": dispatch_at,
+            }
+        },
+    )
+    background_tasks.add_task(dispatch_delete, thread_id, actor)
+    return {"status": "deleted"}
+
+
+@router.post("/{thread_id}/unsubscribe")
+async def unsubscribe_thread(thread_id: str, role=Depends(require_role), db=Depends(get_db)):
+    role_value, actor = role
+    thread = await db.threads.find_one({"_id": thread_id})
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    _check_actionable(role_value, thread["status"], exec_statuses=("board",))
+
+    urls = unsubscribe_service.parse_list_unsubscribe(thread.get("list_unsubscribe", ""))
+    https_url = next((u for u in urls if u.lower().startswith("https://")), None)
+    one_click_ok = https_url and unsubscribe_service.supports_one_click(thread.get("list_unsubscribe_post", ""))
+
+    mechanism = "reply_fallback"
+    if one_click_ok:
+        try:
+            if await unsubscribe_service.one_click_unsubscribe(https_url):
+                mechanism = "one_click"
+        except Exception:
+            pass  # fall through to the reply fallback below
+
+    if mechanism == "reply_fallback":
+        account = await db.accounts.find_one({"_id": thread["account_id"]})
+        creds, refreshed = await gmail.get_valid_credentials(account)
+        if refreshed:
+            await db.accounts.update_one({"_id": account["_id"]}, {"$set": refreshed})
+        to_email = thread.get("reply_to_email") or thread["from_email"]
+        body_text = "Unsubscribe / remove me from this list."
+        response = await gmail.send_message(
+            creds,
+            to_email=to_email,
+            subject=_reply_subject(thread["subject"]),
+            body_text=body_text,
+            gmail_thread_id=thread.get("gmail_thread_id") or None,
+        )
+        # Record the reply in the thread's own messages array — same anti-loop fix as
+        # dispatch_send — so the next sync recognizes it as Emptify's own outgoing
+        # message rather than a genuine new inbound message and spuriously re-triages.
+        sent_message = {
+            "messageId": response.get("id", ""),
+            "from": thread["account_email"],
+            "at": datetime.now(timezone.utc).isoformat(),
+            "body": body_text,
+            "to": [to_email],
+            "cc": [],
+        }
+        await db.threads.update_one({"_id": thread_id}, {"$push": {"messages": sent_message}})
+
+    await write_audit_entry(
+        db,
+        thread_id=thread_id,
+        actor=actor,
+        action="unsubscribe",
+        account_email=thread["account_email"],
+        detail=mechanism,
+    )
+    return {"mechanism": mechanism}
 
 
 @router.post("/{thread_id}/undo")

@@ -10,11 +10,13 @@ import { ReadyScreen } from "./ready-screen";
 import { DetailScreen } from "./detail-screen";
 import { HandoffDialog } from "./handoff-dialog";
 import { ConfirmSendDialog } from "./confirm-send-dialog";
+import { ConfirmDeleteDialog } from "./confirm-delete-dialog";
 import { EmptifyToast } from "./toast";
 import * as api from "@/lib/emptify/api";
 import {
   Account,
   AccountId,
+  ConfirmDeleteDialogState,
   ConfirmDialogState,
   EmailThread,
   HandoffDialogState,
@@ -52,6 +54,7 @@ export function EmptifyApp() {
 
   const [toast, setToast] = useState<ToastState | null>(null);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
+  const [confirmDeleteDialog, setConfirmDeleteDialog] = useState<ConfirmDeleteDialogState | null>(null);
   const [handoffDialog, setHandoffDialog] = useState<HandoffDialogState | null>(null);
   const [toneLoading, setToneLoading] = useState<ToneLoadingState | null>(null);
 
@@ -431,6 +434,68 @@ export function EmptifyApp() {
     [role, screen, detailOrigin, showToast, updateEmail],
   );
 
+  const markReadEmail = useCallback(
+    (id: string) => {
+      api
+        .markReadThread(id, role)
+        .then((updated) => updateEmail(id, updated))
+        .catch(() => showToast("Couldn't mark read — try again.", false));
+    },
+    [role, updateEmail, showToast],
+  );
+
+  const removeEmail = useCallback(
+    (id: string) => {
+      api
+        .removeThread(id, role)
+        .then(() => {
+          updateEmail(id, { status: "removed" });
+          if (screen === "detail") {
+            setScreen(detailOrigin);
+            setSelectedId(null);
+          }
+          showToast("Removed from Emptify.", false);
+        })
+        .catch(() => showToast("Couldn't remove — try again.", false));
+    },
+    [role, screen, detailOrigin, showToast, updateEmail],
+  );
+
+  const openDeleteConfirm = useCallback((id: string) => setConfirmDeleteDialog({ emailId: id }), []);
+  const cancelDelete = useCallback(() => setConfirmDeleteDialog(null), []);
+
+  const confirmDeleteNow = useCallback(() => {
+    if (!confirmDeleteDialog) return;
+    const id = confirmDeleteDialog.emailId;
+    api
+      .deleteThread(id, role)
+      .then(() => {
+        updateEmail(id, { status: "deleted" });
+        setConfirmDeleteDialog(null);
+        if (screen === "detail") {
+          setScreen(detailOrigin);
+          setSelectedId(null);
+        }
+        showToast("Deleted.", true, () => undoPendingAction(id));
+      })
+      .catch(() => showToast("Couldn't delete — try again.", false));
+  }, [confirmDeleteDialog, role, screen, detailOrigin, showToast, undoPendingAction, updateEmail]);
+
+  const unsubscribeEmail = useCallback(
+    (id: string) => {
+      api
+        .unsubscribeThread(id, role)
+        .then((res) => {
+          showToast(
+            res.mechanism === "one_click" ? "Unsubscribed." : "Sent an unsubscribe request.",
+            false,
+          );
+        })
+        .catch(() => showToast("Couldn't unsubscribe — try again.", false));
+    },
+    [role, showToast],
+  );
+
   const markReady = useCallback(
     (id: string) => {
       api
@@ -476,9 +541,19 @@ export function EmptifyApp() {
     () => emails.filter((e) => e.status === "board" && (accountFilter === "all" || e.account === accountFilter)),
     [emails, accountFilter],
   );
-  const todayList = useMemo(() => boardEmails.filter((e) => e.bucket === "today"), [boardEmails]);
-  const weekList = useMemo(() => boardEmails.filter((e) => e.bucket === "week"), [boardEmails]);
-  const waitList = useMemo(() => boardEmails.filter((e) => e.bucket === "wait"), [boardEmails]);
+  const todayList = useMemo(
+    () => boardEmails.filter((e) => e.bucket === "today" && !e.informational),
+    [boardEmails],
+  );
+  const weekList = useMemo(
+    () => boardEmails.filter((e) => e.bucket === "week" && !e.informational),
+    [boardEmails],
+  );
+  const waitList = useMemo(
+    () => boardEmails.filter((e) => e.bucket === "wait" && !e.informational),
+    [boardEmails],
+  );
+  const informationalList = useMemo(() => boardEmails.filter((e) => e.informational), [boardEmails]);
 
   const queueList = useMemo(() => emails.filter((e) => e.status === "withEA"), [emails]);
   const readyList = useMemo(() => emails.filter((e) => e.status === "readyToSend"), [emails]);
@@ -523,8 +598,14 @@ export function EmptifyApp() {
             todayList={todayList}
             weekList={weekList}
             waitList={waitList}
+            informationalList={informationalList}
             onOpen={(id) => openEmail(id, "board")}
             onHandoff={openHandoffDialog}
+            onMarkRead={markReadEmail}
+            onRemove={removeEmail}
+            onArchive={archiveEmail}
+            onDelete={openDeleteConfirm}
+            onUnsubscribe={unsubscribeEmail}
           />
         )}
 
@@ -546,6 +627,10 @@ export function EmptifyApp() {
             onArchive={() => archiveEmail(selectedEmail.id)}
             onSkip={() => skipEmail(selectedEmail.id)}
             onMarkReady={() => markReady(selectedEmail.id)}
+            onMarkRead={() => markReadEmail(selectedEmail.id)}
+            onRemove={() => removeEmail(selectedEmail.id)}
+            onDeleteClick={() => openDeleteConfirm(selectedEmail.id)}
+            onUnsubscribe={() => unsubscribeEmail(selectedEmail.id)}
           />
         )}
       </div>
@@ -566,6 +651,13 @@ export function EmptifyApp() {
         onCcChange={updateConfirmCc}
         onCancel={cancelSend}
         onConfirm={confirmSendNow}
+      />
+
+      <ConfirmDeleteDialog
+        open={!!confirmDeleteDialog}
+        subject={(confirmDeleteDialog ? getEmail(confirmDeleteDialog.emailId) : undefined)?.subject ?? ""}
+        onCancel={cancelDelete}
+        onConfirm={confirmDeleteNow}
       />
 
       {toast && <EmptifyToast message={toast.message} showUndo={toast.showUndo} onUndo={undoLast} />}
