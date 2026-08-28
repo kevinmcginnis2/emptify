@@ -61,6 +61,9 @@ export function DetailScreen({
                 <strong>{m.from}</strong>
                 <span className="text-emptify-muted">{m.at}</span>
               </div>
+              {m.cc && m.cc.length > 0 && (
+                <div className="text-emptify-muted text-[12px]">Cc: {m.cc.join(", ")}</div>
+              )}
               <p className="m-0 text-[14px] whitespace-pre-wrap">{m.body}</p>
             </div>
           ))}

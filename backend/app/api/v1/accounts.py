@@ -85,7 +85,7 @@ async def oauth_callback(code: str, state: str | None = None, db=Depends(get_db)
         "oauth_access_token": creds.token,
         "oauth_expires_at": creds.expiry,
     }
-    set_on_insert: dict = {"internal_domains": ""}
+    set_on_insert: dict = {"internal_domains": "", "history_id": None}
     if creds.refresh_token:
         update["oauth_refresh_token"] = creds.refresh_token
     else:

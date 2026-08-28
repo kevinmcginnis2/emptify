@@ -105,10 +105,11 @@ export async function postRevert(id: string, role: Role): Promise<EmailThread> {
   });
 }
 
-export async function sendThread(id: string, role: Role): Promise<{ status: string }> {
+export async function sendThread(id: string, role: Role, cc: string[] = []): Promise<{ status: string }> {
   return request(`/api/v1/threads/${id}/send`, {
     method: "POST",
     headers: roleHeaders(role),
+    body: JSON.stringify({ cc }),
   });
 }
 

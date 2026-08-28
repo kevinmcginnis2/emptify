@@ -309,8 +309,15 @@ export function EmptifyApp() {
       .catch(() => showToast("Couldn't hand off — try again.", false));
   }, [handoffDialog, role, updateEmail, screen, detailOrigin, showToast]);
 
-  const openSendConfirm = useCallback((id: string) => setConfirmDialog({ emailId: id }), []);
+  const openSendConfirm = useCallback(
+    (id: string) => setConfirmDialog({ emailId: id, cc: getEmail(id)?.ccEmails ?? [] }),
+    [getEmail],
+  );
   const cancelSend = useCallback(() => setConfirmDialog(null), []);
+  const updateConfirmCc = useCallback(
+    (cc: string[]) => setConfirmDialog((prev) => (prev ? { ...prev, cc } : prev)),
+    [],
+  );
 
   const undoPendingAction = useCallback(
     (id: string) => {
@@ -328,7 +335,7 @@ export function EmptifyApp() {
     const em = getEmail(id);
     if (!em) return;
     api
-      .sendThread(id, role)
+      .sendThread(id, role, confirmDialog.cc)
       .then(() => {
         updateEmail(id, { status: "sent" });
         setConfirmDialog(null);
@@ -506,6 +513,8 @@ export function EmptifyApp() {
         open={!!confirmDialog}
         from={confirmEmail?.accountEmail ?? ""}
         to={confirmEmail?.replyToEmail ?? ""}
+        cc={confirmDialog?.cc ?? []}
+        onCcChange={updateConfirmCc}
         onCancel={cancelSend}
         onConfirm={confirmSendNow}
       />

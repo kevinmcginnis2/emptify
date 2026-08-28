@@ -30,6 +30,10 @@ class HandoffBody(BaseModel):
     note: str
 
 
+class SendBody(BaseModel):
+    cc: list[str] = []
+
+
 def _check_actionable(role: str, status: str, exec_statuses: tuple[str, ...]) -> None:
     allowed = status in exec_statuses if role == "exec" else status == "withEA"
     if not allowed:
@@ -58,6 +62,7 @@ def _thread_response(doc: dict) -> dict:
         "handoffReason": doc.get("handoff_reason", ""),
         "status": doc["status"],
         "prevStatus": doc.get("prev_status"),
+        "ccEmails": doc.get("cc_emails", []),
         "eaNote": doc.get("ea_note", ""),
         "eaChangeSummary": doc.get("ea_change_summary", ""),
         "draftAtHandoff": doc.get("draft_at_handoff", ""),
@@ -98,17 +103,32 @@ async def dispatch_send(thread_id: str, actor: str) -> None:
     if refreshed:
         await db.accounts.update_one({"_id": account["_id"]}, {"$set": refreshed})
 
-    await gmail.send_message(
+    to_email = thread.get("reply_to_email") or thread["from_email"]
+    cc_emails = thread.get("pending_cc") or []
+    response = await gmail.send_message(
         creds,
-        to_email=thread.get("reply_to_email") or thread["from_email"],
+        to_email=to_email,
         subject=_reply_subject(thread["subject"]),
         body_text=thread["draft"],
         gmail_thread_id=thread.get("gmail_thread_id") or None,
+        cc_emails=cc_emails,
     )
+
+    sent_message = {
+        "messageId": response.get("id", ""),
+        "from": thread["account_email"],
+        "at": datetime.now(timezone.utc).isoformat(),
+        "body": thread["draft"],
+        "to": [to_email],
+        "cc": cc_emails,
+    }
 
     await db.threads.update_one(
         {"_id": thread_id},
-        {"$unset": {"pending_action": "", "pending_dispatch_at": "", "prev_status": ""}},
+        {
+            "$unset": {"pending_action": "", "pending_dispatch_at": "", "prev_status": "", "pending_cc": ""},
+            "$push": {"messages": sent_message},
+        },
     )
     await write_audit_entry(
         db,
@@ -122,6 +142,7 @@ async def dispatch_send(thread_id: str, actor: str) -> None:
 @router.post("/{thread_id}/send")
 async def send_thread(
     thread_id: str,
+    body: SendBody,
     background_tasks: BackgroundTasks,
     role=Depends(require_role),
     db=Depends(get_db),
@@ -142,6 +163,7 @@ async def send_thread(
                 "prev_status": prev_status,
                 "pending_action": "send",
                 "pending_dispatch_at": dispatch_at,
+                "pending_cc": body.cc,
             }
         },
     )
@@ -236,7 +258,12 @@ async def undo_thread(thread_id: str, role=Depends(require_role), db=Depends(get
         {"_id": thread_id},
         {
             "$set": {"status": prev_status},
-            "$unset": {"pending_action": "", "pending_dispatch_at": "", "prev_status": ""},
+            "$unset": {
+                "pending_action": "",
+                "pending_dispatch_at": "",
+                "prev_status": "",
+                "pending_cc": "",
+            },
         },
     )
     return {"status": prev_status}

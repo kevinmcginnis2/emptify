@@ -7,6 +7,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 from app.config import settings
 
@@ -111,16 +112,19 @@ def _send_message_sync(
     subject: str,
     body_text: str,
     gmail_thread_id: str | None,
-) -> None:
+    cc_emails: list[str] | None,
+) -> dict:
     service = build("gmail", "v1", credentials=creds)
     message = MIMEText(body_text)
     message["to"] = to_email
+    if cc_emails:
+        message["cc"] = ", ".join(cc_emails)
     message["subject"] = subject
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
     body: dict = {"raw": raw}
     if gmail_thread_id:
         body["threadId"] = gmail_thread_id
-    service.users().messages().send(userId="me", body=body).execute()
+    return service.users().messages().send(userId="me", body=body).execute()
 
 
 async def send_message(
@@ -129,8 +133,11 @@ async def send_message(
     subject: str,
     body_text: str,
     gmail_thread_id: str | None = None,
-) -> None:
-    await asyncio.to_thread(_send_message_sync, creds, to_email, subject, body_text, gmail_thread_id)
+    cc_emails: list[str] | None = None,
+) -> dict:
+    return await asyncio.to_thread(
+        _send_message_sync, creds, to_email, subject, body_text, gmail_thread_id, cc_emails
+    )
 
 
 def _archive_thread_sync(creds: Credentials, gmail_thread_id: str) -> None:
@@ -220,3 +227,48 @@ def _get_thread_full_sync(creds: Credentials, gmail_thread_id: str) -> dict:
 
 async def get_thread_full(creds: Credentials, gmail_thread_id: str) -> dict:
     return await asyncio.to_thread(_get_thread_full_sync, creds, gmail_thread_id)
+
+
+def _get_current_history_id_sync(creds: Credentials) -> str:
+    service = build("gmail", "v1", credentials=creds)
+    profile = service.users().getProfile(userId="me").execute()
+    return profile["historyId"]
+
+
+async def get_current_history_id(creds: Credentials) -> str:
+    return await asyncio.to_thread(_get_current_history_id_sync, creds)
+
+
+def _get_history_sync(creds: Credentials, start_history_id: str) -> tuple[list[dict] | None, str | None]:
+    service = build("gmail", "v1", credentials=creds)
+    records: list[dict] = []
+    page_token = None
+    new_history_id = None
+    while True:
+        try:
+            resp = (
+                service.users()
+                .history()
+                .list(
+                    userId="me",
+                    startHistoryId=start_history_id,
+                    historyTypes=["messageAdded", "messageDeleted", "labelAdded"],
+                    pageToken=page_token,
+                )
+                .execute()
+            )
+        except HttpError as e:
+            if e.resp.status == 404:
+                return None, None
+            raise
+        records.extend(resp.get("history", []))
+        if new_history_id is None:
+            new_history_id = resp.get("historyId")
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return records, new_history_id or start_history_id
+
+
+async def get_history(creds: Credentials, start_history_id: str) -> tuple[list[dict] | None, str | None]:
+    return await asyncio.to_thread(_get_history_sync, creds, start_history_id)

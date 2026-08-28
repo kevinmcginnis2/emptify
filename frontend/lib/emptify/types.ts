@@ -33,9 +33,12 @@ export interface Account {
 }
 
 export interface Message {
+  messageId?: string;
   from: string;
   at: string;
   body: string;
+  to?: string[];
+  cc?: string[];
 }
 
 export interface EmailThread {
@@ -59,6 +62,7 @@ export interface EmailThread {
   handoffReason: string;
   status: EmailStatus;
   prevStatus?: EmailStatus;
+  ccEmails: string[];
   eaNote: string;
   eaChangeSummary: string;
   draftAtHandoff: string;
@@ -94,6 +98,7 @@ export interface HandoffDialogState {
 
 export interface ConfirmDialogState {
   emailId: string;
+  cc: string[];
 }
 
 export interface ToneLoadingState {

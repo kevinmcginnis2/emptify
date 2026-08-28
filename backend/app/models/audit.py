@@ -3,8 +3,8 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-Actor = Literal["Mara Lindqvist", "Theo Banks"]
-Action = Literal["handoff", "edit", "mark_ready", "send", "archive", "skip"]
+Actor = Literal["Mara Lindqvist", "Theo Banks", "Emptify Sync"]
+Action = Literal["handoff", "edit", "mark_ready", "send", "archive", "skip", "sync_archive", "sync_reclassify"]
 
 
 class AuditEntry(BaseModel):

@@ -1,12 +1,14 @@
 import asyncio
 import re
 from datetime import datetime, timedelta, timezone
+from email.utils import getaddresses
 
 from anthropic import Anthropic
 
 from app.config import settings
 from app.db import get_db
 from app.services import gmail
+from app.services.audit import write_audit_entry
 from app.services.voice import classify_domain, extract_body_text
 
 NEW_MESSAGES_CAP = 20
@@ -30,6 +32,10 @@ def _parse_from(from_header: str) -> tuple[str, str]:
     return "", email
 
 
+def _addresses(header_value: str) -> list[str]:
+    return [addr for _, addr in getaddresses([header_value]) if addr]
+
+
 def _extract_messages(full_thread: dict) -> list[dict]:
     result = []
     for msg in full_thread.get("messages", []):
@@ -39,7 +45,16 @@ def _extract_messages(full_thread: dict) -> list[dict]:
         body = extract_body_text(payload).strip()[:MESSAGE_BODY_TRUNCATE]
         internal_date_ms = int(msg.get("internalDate", "0") or "0")
         at = datetime.fromtimestamp(internal_date_ms / 1000, tz=timezone.utc).isoformat()
-        result.append({"from": from_name or from_email, "at": at, "body": body})
+        result.append(
+            {
+                "messageId": msg.get("id", ""),
+                "from": from_name or from_email,
+                "at": at,
+                "body": body,
+                "to": _addresses(headers.get("to", "")),
+                "cc": _addresses(headers.get("cc", "")),
+            }
+        )
     return result
 
 
@@ -124,12 +139,150 @@ async def classify_thread(
     )
 
 
-async def sync_account_board(account: dict) -> None:
-    db = get_db()
-    creds, refreshed = await gmail.get_valid_credentials(account)
-    if refreshed:
-        await db.accounts.update_one({"_id": account["_id"]}, {"$set": refreshed})
+def _classification_fields(
+    full_thread: dict, messages: list[dict], account: dict
+) -> tuple[dict, str, str]:
+    """Derive subject/from/reply-to/cc/voice fields from a freshly fetched thread, and
+    return them alongside the from_email and latest body needed to run classification."""
+    last_message = full_thread["messages"][-1]
+    headers = _headers_dict(last_message.get("payload", {}))
+    subject = headers.get("subject", "(no subject)")
+    from_name, from_email = _parse_from(headers.get("from", ""))
+    latest_body = messages[-1]["body"]
 
+    _, reply_to_email = _parse_from(headers.get("reply-to", ""))
+    reply_to_email = reply_to_email or from_email
+    cc_emails = [a for a in _addresses(headers.get("cc", "")) if a.lower() != account["email"].lower()]
+
+    domain_match = re.search(r"@([\w.-]+)", from_email)
+    domain = domain_match.group(1).lower() if domain_match else ""
+    voice_mode = classify_domain(from_email, account.get("internal_domains", ""))
+    voice_why = _voice_why(voice_mode, domain)
+
+    fields = {
+        "from_name": from_name or from_email,
+        "from_email": from_email,
+        "reply_to_email": reply_to_email,
+        "cc_emails": cc_emails,
+        "subject": subject,
+        "voice_mode": voice_mode,
+        "voice_why": voice_why,
+    }
+    return fields, from_name, latest_body
+
+
+async def _ingest_new_thread(db, account: dict, creds, gmail_thread_id: str) -> None:
+    full_thread = await gmail.get_thread_full(creds, gmail_thread_id)
+    messages = _extract_messages(full_thread)
+    if not messages:
+        return
+
+    fields, from_name, latest_body = _classification_fields(full_thread, messages, account)
+
+    voice_profile = await db.voice_profiles.find_one({"_id": fields["voice_mode"]})
+    voice_traits = (voice_profile or {}).get("traits", [])
+    voice_notes = (voice_profile or {}).get("notes", "")
+
+    classification = await classify_thread(
+        fields["subject"], from_name, fields["from_email"], latest_body, voice_traits, voice_notes
+    )
+
+    doc = {
+        "_id": gmail_thread_id,
+        "account_id": account["_id"],
+        "account_label": account["name"],
+        "account_email": account["email"],
+        **fields,
+        "bucket": classification.get("bucket", "wait"),
+        "reason": classification.get("reason", ""),
+        "messages": messages,
+        "draft": classification.get("draft", ""),
+        "draft_author": "emptify",
+        "version_stack": [],
+        "handoff_suggested": classification.get("handoff_suggested", False),
+        "handoff_reason": classification.get("handoff_reason", ""),
+        "status": "board",
+        "ea_note": "",
+        "ea_change_summary": "",
+        "draft_at_handoff": "",
+        "gmail_thread_id": gmail_thread_id,
+    }
+    await db.threads.insert_one(doc)
+
+
+async def _resync_existing_thread(db, account: dict, creds, thread_id: str) -> None:
+    doc = await db.threads.find_one({"_id": thread_id})
+    if not doc:
+        return
+
+    full_thread = await gmail.get_thread_full(creds, thread_id)
+    messages = _extract_messages(full_thread)
+    if not messages:
+        return
+
+    known_ids = {m.get("messageId") for m in doc.get("messages", []) if m.get("messageId")}
+    fresh_ids = {m.get("messageId") for m in messages if m.get("messageId")}
+    if fresh_ids <= known_ids:
+        # Nothing genuinely new — this touch was Emptify's own send rippling through
+        # History. Just keep the stored messages current and stop.
+        await db.threads.update_one({"_id": thread_id}, {"$set": {"messages": messages}})
+        return
+
+    fields, from_name, latest_body = _classification_fields(full_thread, messages, account)
+
+    voice_profile = await db.voice_profiles.find_one({"_id": fields["voice_mode"]})
+    voice_traits = (voice_profile or {}).get("traits", [])
+    voice_notes = (voice_profile or {}).get("notes", "")
+
+    classification = await classify_thread(
+        fields["subject"], from_name, fields["from_email"], latest_body, voice_traits, voice_notes
+    )
+
+    await db.threads.update_one(
+        {"_id": thread_id},
+        {
+            "$set": {
+                **fields,
+                "bucket": classification.get("bucket", "wait"),
+                "reason": classification.get("reason", ""),
+                "messages": messages,
+                "draft": classification.get("draft", ""),
+                "draft_author": "emptify",
+                "version_stack": [],
+                "handoff_suggested": classification.get("handoff_suggested", False),
+                "handoff_reason": classification.get("handoff_reason", ""),
+                "status": "board",
+            }
+        },
+    )
+    await write_audit_entry(
+        db,
+        thread_id=thread_id,
+        actor="Emptify Sync",
+        action="sync_reclassify",
+        account_email=account["email"],
+        detail="New message detected directly in Gmail; re-triaged.",
+    )
+
+
+async def _mark_deleted_in_gmail(db, thread_id: str, account: dict) -> None:
+    doc = await db.threads.find_one_and_update(
+        {"_id": thread_id, "status": {"$ne": "archived"}},
+        {"$set": {"status": "archived"}},
+        return_document=True,
+    )
+    if doc:
+        await write_audit_entry(
+            db,
+            thread_id=thread_id,
+            actor="Emptify Sync",
+            action="sync_archive",
+            account_email=account["email"],
+            detail="Message deleted/trashed directly in Gmail.",
+        )
+
+
+async def _bootstrap_sync(db, account: dict, creds) -> None:
     since = account.get("last_sync") or (datetime.now(timezone.utc) - timedelta(days=90))
     since_str = since.strftime("%Y/%m/%d")
 
@@ -146,62 +299,70 @@ async def sync_account_board(account: dict) -> None:
         if await db.threads.find_one({"_id": gmail_thread_id}):
             continue
 
-        full_thread = await gmail.get_thread_full(creds, gmail_thread_id)
-        messages = _extract_messages(full_thread)
-        if not messages:
-            continue
+        await _ingest_new_thread(db, account, creds, gmail_thread_id)
 
-        last_message = full_thread["messages"][-1]
-        headers = _headers_dict(last_message.get("payload", {}))
-        subject = headers.get("subject", "(no subject)")
-        from_name, from_email = _parse_from(headers.get("from", ""))
-        latest_body = messages[-1]["body"]
+    if hit_cap:
+        return  # still catching up on the backlog — next call continues from here
 
-        _, reply_to_email = _parse_from(headers.get("reply-to", ""))
-        reply_to_email = reply_to_email or from_email
+    await db.accounts.update_one({"_id": account["_id"]}, {"$set": {"last_sync": datetime.now(timezone.utc)}})
+    new_history_id = await gmail.get_current_history_id(creds)
+    if new_history_id:
+        await db.accounts.update_one({"_id": account["_id"]}, {"$set": {"history_id": new_history_id}})
 
-        domain_match = re.search(r"@([\w.-]+)", from_email)
-        domain = domain_match.group(1).lower() if domain_match else ""
-        voice_mode = classify_domain(from_email, account.get("internal_domains", ""))
-        voice_why = _voice_why(voice_mode, domain)
 
-        voice_profile = await db.voice_profiles.find_one({"_id": voice_mode})
-        voice_traits = (voice_profile or {}).get("traits", [])
-        voice_notes = (voice_profile or {}).get("notes", "")
+async def sync_account_board(account: dict) -> None:
+    db = get_db()
+    creds, refreshed = await gmail.get_valid_credentials(account)
+    if refreshed:
+        await db.accounts.update_one({"_id": account["_id"]}, {"$set": refreshed})
 
-        classification = await classify_thread(
-            subject, from_name, from_email, latest_body, voice_traits, voice_notes
-        )
+    history_id = account.get("history_id")
+    if not history_id:
+        await _bootstrap_sync(db, account, creds)
+        return
 
-        doc = {
-            "_id": gmail_thread_id,
-            "account_id": account["_id"],
-            "account_label": account["name"],
-            "account_email": account["email"],
-            "from_name": from_name or from_email,
-            "from_email": from_email,
-            "reply_to_email": reply_to_email,
-            "subject": subject,
-            "bucket": classification.get("bucket", "wait"),
-            "reason": classification.get("reason", ""),
-            "voice_mode": voice_mode,
-            "voice_why": voice_why,
-            "messages": messages,
-            "draft": classification.get("draft", ""),
-            "draft_author": "emptify",
-            "version_stack": [],
-            "handoff_suggested": classification.get("handoff_suggested", False),
-            "handoff_reason": classification.get("handoff_reason", ""),
-            "status": "board",
-            "ea_note": "",
-            "ea_change_summary": "",
-            "draft_at_handoff": "",
-            "gmail_thread_id": gmail_thread_id,
-        }
-        await db.threads.insert_one(doc)
+    records, new_history_id = await gmail.get_history(creds, history_id)
+    if records is None:
+        # startHistoryId aged out of Gmail's retention window — fall back to a full
+        # resync. Anything that changed during the gap is a known, accepted miss.
+        await db.accounts.update_one({"_id": account["_id"]}, {"$unset": {"history_id": ""}})
+        await _bootstrap_sync(db, account, creds)
+        return
 
-    if not hit_cap:
-        await db.accounts.update_one({"_id": account["_id"]}, {"$set": {"last_sync": datetime.now(timezone.utc)}})
+    new_thread_ids: set[str] = set()
+    touched_thread_ids: set[str] = set()
+    deleted_thread_ids: set[str] = set()
+
+    for record in records:
+        for added in record.get("messagesAdded", []):
+            msg = added.get("message", {})
+            thread_id = msg.get("threadId")
+            if not thread_id:
+                continue
+            if await db.threads.find_one({"_id": thread_id}):
+                touched_thread_ids.add(thread_id)
+            elif "INBOX" in (msg.get("labelIds") or []):
+                new_thread_ids.add(thread_id)
+        for deleted in record.get("messagesDeleted", []):
+            thread_id = deleted.get("message", {}).get("threadId")
+            if thread_id:
+                deleted_thread_ids.add(thread_id)
+        for label_change in record.get("labelsAdded", []):
+            if "TRASH" in (label_change.get("labelIds") or []):
+                thread_id = label_change.get("message", {}).get("threadId")
+                if thread_id:
+                    deleted_thread_ids.add(thread_id)
+
+    for thread_id in deleted_thread_ids:
+        await _mark_deleted_in_gmail(db, thread_id, account)
+
+    for thread_id in new_thread_ids - deleted_thread_ids:
+        await _ingest_new_thread(db, account, creds, thread_id)
+
+    for thread_id in touched_thread_ids - deleted_thread_ids:
+        await _resync_existing_thread(db, account, creds, thread_id)
+
+    await db.accounts.update_one({"_id": account["_id"]}, {"$set": {"history_id": new_history_id}})
 
 
 async def sync_board() -> None:
